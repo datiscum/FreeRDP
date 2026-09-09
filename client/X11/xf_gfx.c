@@ -112,16 +112,6 @@ static int g_xf_shm_error_base = -1;
 static int g_xf_shm_last_error = 0;
 static int g_xf_shm_last_request_code = 0;
 static int g_xf_shm_last_minor_code = 0;
-static BOOL g_xf_shm_runtime_disabled = FALSE;
-static BOOL g_xf_shm_runtime_checked = FALSE;
-static BOOL g_xf_shm_runtime_available = FALSE;
-static BOOL g_xf_shm_runtime_ok_logged = FALSE;
-static BOOL g_xf_shm_runtime_fail_logged = FALSE;
-static BOOL g_xf_shm_runtime_put_fail_logged = FALSE;
-static BOOL g_xf_shm_runtime_put_checked = FALSE;
-static int g_xf_shm_runtime_major = 0;
-static int g_xf_shm_runtime_minor = 0;
-static Bool g_xf_shm_runtime_pixmaps = False;
 static int (*g_xf_shm_old_error_handler)(Display*, XErrorEvent*) = NULL;
 
 static int xf_shm_temp_error_handler(Display* display, XErrorEvent* event)
@@ -151,30 +141,29 @@ static BOOL xf_shm_runtime_query(xfContext* xfc)
 	WINPR_ASSERT(xfc);
 	WINPR_ASSERT(xfc->display);
 
-	if (g_xf_shm_runtime_disabled)
+	if (xfc->shm.disabled)
 		return FALSE;
 
-	if (g_xf_shm_runtime_checked)
-		return g_xf_shm_runtime_available;
+	if (xfc->shm.checked)
+		return xfc->shm.available;
 
-	g_xf_shm_runtime_checked = TRUE;
+	xfc->shm.checked = TRUE;
 
 	if (!XShmQueryExtension(xfc->display))
 	{
 		WLog_INFO(TAG, "XShm runtime: MIT-SHM extension not available on this X connection");
-		g_xf_shm_runtime_available = FALSE;
+		xfc->shm.available = FALSE;
 		return FALSE;
 	}
 
-	if (!XShmQueryVersion(xfc->display, &g_xf_shm_runtime_major, &g_xf_shm_runtime_minor,
-	                     &g_xf_shm_runtime_pixmaps))
+	if (!XShmQueryVersion(xfc->display, &xfc->shm.major, &xfc->shm.minor, &xfc->shm.pixmaps))
 	{
 		WLog_WARN(TAG, "XShm runtime: XShmQueryVersion failed on this X connection");
-		g_xf_shm_runtime_available = FALSE;
+		xfc->shm.available = FALSE;
 		return FALSE;
 	}
 
-	g_xf_shm_runtime_available = TRUE;
+	xfc->shm.available = TRUE;
 	return TRUE;
 }
 
@@ -290,7 +279,7 @@ static BOOL xf_shm_create_surface_image(xfContext* xfc, xfGfxSurface* surface)
 	WINPR_ASSERT(xfc);
 	WINPR_ASSERT(surface);
 
-	if (g_xf_shm_runtime_disabled)
+	if (xfc->shm.disabled)
 		return FALSE;
 
 	if (!xf_shm_runtime_query(xfc))
@@ -339,17 +328,16 @@ static BOOL xf_shm_create_surface_image(xfContext* xfc, xfGfxSurface* surface)
 
 	if (!xf_shm_attach_checked(xfc, shminfo))
 	{
-		if (!g_xf_shm_runtime_fail_logged)
+		if (!xfc->shm.failLogged)
 		{
 			WLog_WARN(TAG,
 			          "XShm runtime: attach failed on this X connection, disabling XShm "
 			          "version=%d.%d sharedPixmaps=%s lastError=%d request=%d minor=%d",
-			          g_xf_shm_runtime_major, g_xf_shm_runtime_minor,
-			          g_xf_shm_runtime_pixmaps ? "yes" : "no", g_xf_shm_last_error,
-			          g_xf_shm_last_request_code, g_xf_shm_last_minor_code);
-			g_xf_shm_runtime_fail_logged = TRUE;
+			          xfc->shm.major, xfc->shm.minor, xfc->shm.pixmaps ? "yes" : "no",
+			          g_xf_shm_last_error, g_xf_shm_last_request_code, g_xf_shm_last_minor_code);
+			xfc->shm.failLogged = TRUE;
 		}
-		g_xf_shm_runtime_disabled = TRUE;
+		xfc->shm.disabled = TRUE;
 		shmdt(shminfo->shmaddr);
 		shmctl(shminfo->shmid, IPC_RMID, NULL);
 		image->data = NULL;
@@ -370,14 +358,13 @@ static BOOL xf_shm_create_surface_image(xfContext* xfc, xfGfxSurface* surface)
 		return FALSE;
 	}
 
-	if (!g_xf_shm_runtime_ok_logged)
+	if (!xfc->shm.okLogged)
 	{
-		WLog_INFO(TAG,
-		          "XShm runtime: enabled version=%d.%d sharedPixmaps=%s image=%ux%u bpl=%d size=%zu",
-		          g_xf_shm_runtime_major, g_xf_shm_runtime_minor,
-		          g_xf_shm_runtime_pixmaps ? "yes" : "no", surface->gdi.width,
-		          surface->gdi.height, image->bytes_per_line, size);
-		g_xf_shm_runtime_ok_logged = TRUE;
+		WLog_INFO(
+		    TAG, "XShm runtime: enabled version=%d.%d sharedPixmaps=%s image=%ux%u bpl=%d size=%zu",
+		    xfc->shm.major, xfc->shm.minor, xfc->shm.pixmaps ? "yes" : "no", surface->gdi.width,
+		    surface->gdi.height, image->bytes_per_line, size);
+		xfc->shm.okLogged = TRUE;
 	}
 
 	surface->image = image;
@@ -424,7 +411,7 @@ static void xf_surface_put_image(xfContext* xfc, xfGfxSurface* surface, Drawable
 	WINPR_ASSERT(xfc);
 	WINPR_ASSERT(surface);
 
-	if (xf_shm_find_surface(surface) && !g_xf_shm_runtime_disabled)
+	if (xf_shm_find_surface(surface) && !xfc->shm.disabled)
 	{
 		xfShmPutArg put = { .drawable = drawable,
 		                    .gc = xfc->gc,
@@ -436,26 +423,26 @@ static void xf_surface_put_image(xfContext* xfc, xfGfxSurface* surface, Drawable
 		                    .width = width,
 		                    .height = height };
 
-		if (!g_xf_shm_runtime_put_checked)
+		if (!xfc->shm.putChecked)
 		{
 			if (xf_shm_call_checked(xfc, xf_shm_put_call, &put, TRUE))
 			{
-				g_xf_shm_runtime_put_checked = TRUE;
+				xfc->shm.putChecked = TRUE;
 				return;
 			}
 
 			/* XShmPutImage can fail asynchronously with BadShmSeg on some X setups.
 			 * Disable XShm for the remaining lifetime of this process and fall back
 			 * to plain XPutImage using the same local image buffer. */
-			if (!g_xf_shm_runtime_put_fail_logged)
+			if (!xfc->shm.putFailLogged)
 			{
 				WLog_WARN(TAG,
 				          "XShm runtime: XShmPutImage failed, disabling XShm lastError=%d request=%d minor=%d",
 				          g_xf_shm_last_error, g_xf_shm_last_request_code,
 				          g_xf_shm_last_minor_code);
-				g_xf_shm_runtime_put_fail_logged = TRUE;
+				xfc->shm.putFailLogged = TRUE;
 			}
-			g_xf_shm_runtime_disabled = TRUE;
+			xfc->shm.disabled = TRUE;
 		}
 		else
 		{
