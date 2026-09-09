@@ -177,6 +177,22 @@ struct xf_context
 	BOOL remote_app;
 	HANDLE mutex;
 	BOOL UseXThreads;
+#ifdef WITH_XSHM
+	struct
+	{
+		BOOL disabled;
+		BOOL checked;
+		BOOL available;
+		BOOL okLogged;
+		BOOL failLogged;
+		BOOL putFailLogged;
+		BOOL putChecked;
+		int major;
+		int minor;
+		Bool pixmaps;
+	} shm;
+#endif
+
 	BOOL cursorHidden;
 
 	UINT32 bitmap_size;
