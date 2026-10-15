@@ -145,22 +145,20 @@ option(WITH_GFX_AZURE "[experimental,unstable ABI/API] Enable Azure extension su
 option(WITH_FFMPEG "Enable FFMPEG for audio/video encoding/decoding" ON)
 cmake_dependent_option(WITH_DSP_FFMPEG "Use FFMPEG for audio encoding/decoding" ON "WITH_FFMPEG" OFF)
 cmake_dependent_option(WITH_VIDEO_FFMPEG "Use FFMPEG for video encoding/decoding" ON "WITH_FFMPEG" OFF)
-cmake_dependent_option(WITH_VAAPI "[experimental] Use FFMPEG VAAPI" OFF "WITH_VIDEO_FFMPEG" OFF)
 cmake_dependent_option(
   WITH_LIBVA_AV1_DECODE "[experimental] Use FFmpeg VAAPI hardware AV1 decoding with software fallback" ON
   "WITH_VIDEO_FFMPEG;WITH_VAAPI;WITH_GFX_AV1" OFF
 )
 cmake_dependent_option(
-  WITH_VAAPI_H264_ENCODING "[experimental] Use FFMPEG VAAPI hardware H264 encoding" ON "WITH_VIDEO_FFMPEG" OFF
+  WITH_FFMPEG_HWACCEL "[experimental] Use FFMPEG hardware acceleration" OFF "WITH_VIDEO_FFMPEG" OFF
 )
-cmake_dependent_option(
-  WITH_VIDEOTOOLBOX "[experimental] Use FFMPEG VideoToolbox hardware H264 decoding" OFF "WITH_VIDEO_FFMPEG;APPLE" OFF
-)
-if(WITH_VAAPI_H264_ENCODING)
-  include(WarnExperimental)
-  warn_experimental("VAAPI H264 encoding" "-DWITH_VAAPI_H264_ENCODING=OFF")
 
-  add_definitions("-DWITH_VAAPI_H264_ENCODING")
+if(WITH_VIDEOTOOLBOX OR WITH_VAAPI OR WITH_VAAPI_H264_ENCODING)
+  message(
+    WARNING
+      "WITH_VAAPI, WITH_VAAPI_H264_ENCODING and WITH_VIDEOTOOLBOX are deprecated, use WITH_FFMPEG_HWACCEL instead!"
+  )
+  set(WITH_FFMPEG_HWACCEL ON CACHE BOOL "externally set")
 endif()
 
 if(WITH_LIBVA_AV1_DECODE)
@@ -185,7 +183,7 @@ if(UNIX AND NOT APPLE AND NOT ANDROID)
   find_package(OSS)
   find_package(SNDIO)
   option(WITH_ALSA "use ALSA for sound" ${ALSA_FOUND})
-  option(WITH_PULSE "use Pulse for sound" ${PULSE_FOUND})
+  option(WITH_PULSE "use Pulse for sound" ${PulseAudio_FOUND})
   option(WITH_OSS "use OSS for sound" ${OSS_FOUND})
   option(WITH_SNDIO "use Sndio for sound" ${SNDIO_FOUND})
 endif()

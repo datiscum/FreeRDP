@@ -1489,19 +1489,25 @@ BOOL rdp_server_accept_nego(rdpRdp* rdp, wStream* s)
 		return FALSE;
 
 	RequestedProtocols = nego_get_requested_protocols(nego);
-	WLog_DBG(TAG, "Client Security: RDSTLS:%d NLA:%d TLS:%d RDP:%d",
+	WLog_DBG(TAG, "Client Security: RDSTLS:%d NLA:%d EXT:%d TLS:%d RDP:%d",
 	         (RequestedProtocols & PROTOCOL_RDSTLS) ? 1 : 0,
 	         (RequestedProtocols & PROTOCOL_HYBRID) ? 1 : 0,
+	         (RequestedProtocols & PROTOCOL_HYBRID_EX) ? 1 : 0,
 	         (RequestedProtocols & PROTOCOL_SSL) ? 1 : 0,
 	         (RequestedProtocols == PROTOCOL_RDP) ? 1 : 0);
 	WLog_DBG(TAG,
-	         "Server Security: RDSTLS:%" PRId32 " NLA:%" PRId32 " TLS:%" PRId32 " RDP:%" PRId32 "",
-	         settings->RdstlsSecurity, settings->NlaSecurity, settings->TlsSecurity,
-	         settings->RdpSecurity);
+	         "Server Security: RDSTLS:%" PRId32 " NLA:%" PRId32 " EXT:%" PRId32 " TLS:%" PRId32
+	         " RDP:%" PRId32 "",
+	         settings->RdstlsSecurity, settings->NlaSecurity, settings->ExtSecurity,
+	         settings->TlsSecurity, settings->RdpSecurity);
 
 	if ((settings->RdstlsSecurity) && (RequestedProtocols & PROTOCOL_RDSTLS))
 	{
 		SelectedProtocol = PROTOCOL_RDSTLS;
+	}
+	else if ((settings->ExtSecurity) && (RequestedProtocols & PROTOCOL_HYBRID_EX))
+	{
+		SelectedProtocol = PROTOCOL_HYBRID_EX;
 	}
 	else if ((settings->NlaSecurity) && (RequestedProtocols & PROTOCOL_HYBRID))
 	{
@@ -1530,7 +1536,7 @@ BOOL rdp_server_accept_nego(rdpRdp* rdp, wStream* s)
 		}
 		else
 		{
-			if (settings->NlaSecurity && !settings->TlsSecurity)
+			if ((settings->ExtSecurity || settings->NlaSecurity) && !settings->TlsSecurity)
 			{
 				WLog_WARN(TAG, "server supports only NLA Security");
 				SelectedProtocol |= HYBRID_REQUIRED_BY_SERVER;
@@ -1547,9 +1553,10 @@ BOOL rdp_server_accept_nego(rdpRdp* rdp, wStream* s)
 
 	if (!(SelectedProtocol & PROTOCOL_FAILED_NEGO))
 	{
-		WLog_DBG(TAG, "Negotiated Security: RDSTLS:%d NLA:%d TLS:%d RDP:%d",
+		WLog_DBG(TAG, "Negotiated Security: RDSTLS:%d NLA:%d EXT:%d TLS:%d RDP:%d",
 		         (SelectedProtocol & PROTOCOL_RDSTLS) ? 1 : 0,
 		         (SelectedProtocol & PROTOCOL_HYBRID) ? 1 : 0,
+		         (SelectedProtocol & PROTOCOL_HYBRID_EX) ? 1 : 0,
 		         (SelectedProtocol & PROTOCOL_SSL) ? 1 : 0,
 		         (SelectedProtocol == PROTOCOL_RDP) ? 1 : 0);
 	}
@@ -1576,7 +1583,9 @@ BOOL rdp_server_accept_nego(rdpRdp* rdp, wStream* s)
 	else if (SelectedProtocol & PROTOCOL_RDSTLS)
 		status = transport_accept_rdstls(rdp->transport);
 	else if (SelectedProtocol & PROTOCOL_HYBRID)
-		status = transport_accept_nla(rdp->transport);
+		status = transport_accept_nla(rdp->transport, FALSE);
+	else if (SelectedProtocol & PROTOCOL_HYBRID_EX)
+		status = transport_accept_nla(rdp->transport, TRUE);
 	else if (SelectedProtocol & PROTOCOL_SSL)
 		status = transport_accept_tls(rdp->transport);
 	else if (SelectedProtocol == PROTOCOL_RDP) /* 0 */
@@ -1744,7 +1753,7 @@ BOOL rdp_server_accept_mcs_connect_initial(rdpRdp* rdp, wStream* s)
 	rdpMcs* mcs = rdp->mcs;
 	WINPR_ASSERT(mcs);
 
-	WINPR_ASSERT(rdp_get_state(rdp) == CONNECTION_STATE_MCS_CREATE_REQUEST);
+	WINPR_ASSERT(rdp_is_reached_state(rdp, CONNECTION_STATE_MCS_CREATE_REQUEST));
 	if (!mcs_recv_connect_initial(mcs, s))
 		return FALSE;
 	WINPR_ASSERT(rdp->settings);
@@ -1789,7 +1798,7 @@ BOOL rdp_server_accept_mcs_erect_domain_request(rdpRdp* rdp, wStream* s)
 {
 	WINPR_ASSERT(rdp);
 	WINPR_ASSERT(s);
-	WINPR_ASSERT(rdp_get_state(rdp) == CONNECTION_STATE_MCS_ERECT_DOMAIN);
+	WINPR_ASSERT(rdp_is_reached_state(rdp, CONNECTION_STATE_MCS_ERECT_DOMAIN));
 
 	if (!mcs_recv_erect_domain_request(rdp->mcs, s))
 		return FALSE;
@@ -1845,7 +1854,7 @@ BOOL rdp_server_accept_mcs_channel_join_request(rdpRdp* rdp, wStream* s)
 	mcs = rdp->mcs;
 	WINPR_ASSERT(mcs);
 
-	WINPR_ASSERT(rdp_get_state(rdp) == CONNECTION_STATE_MCS_CHANNEL_JOIN_REQUEST);
+	WINPR_ASSERT(rdp_is_reached_state(rdp, CONNECTION_STATE_MCS_CHANNEL_JOIN_REQUEST));
 
 	if (!mcs_recv_channel_join_request(mcs, rdp->settings, s, &channelId))
 		return FALSE;
@@ -2000,6 +2009,38 @@ static BOOL rdp_is_active_client_state(CONNECTION_STATE state)
 		default:
 			return FALSE;
 	}
+}
+
+BOOL rdp_has_reached_state_impl(const rdpRdp* rdp, CONNECTION_STATE state, const char* file,
+                                size_t line, const char* fkt)
+{
+	WINPR_ASSERT(rdp);
+	const CONNECTION_STATE cur = rdp_get_state(rdp);
+	if (cur < state)
+	{
+		if (WLog_IsLevelActive(rdp->log, WLOG_WARN))
+			WLog_PrintTextMessage(rdp->log, WLOG_WARN, line, file, fkt,
+			                      "State %s (or higher) requested, but %s found. Aborting.",
+			                      rdp_state_string(state), rdp_state_string(cur));
+		return FALSE;
+	}
+	return TRUE;
+}
+
+BOOL rdp_is_reached_state_impl(const rdpRdp* rdp, CONNECTION_STATE state, const char* file,
+                               size_t line, const char* fkt)
+{
+	WINPR_ASSERT(rdp);
+	const CONNECTION_STATE cur = rdp_get_state(rdp);
+	if (cur != state)
+	{
+		if (WLog_IsLevelActive(rdp->log, WLOG_WARN))
+			WLog_PrintTextMessage(rdp->log, WLOG_WARN, line, file, fkt,
+			                      "State %s requested, but %s found. Aborting.",
+			                      rdp_state_string(state), rdp_state_string(cur));
+		return FALSE;
+	}
+	return TRUE;
 }
 
 BOOL rdp_is_active_state(const rdpRdp* rdp)
@@ -2236,6 +2277,22 @@ state_run_t rdp_client_connect_confirm_active(rdpRdp* rdp, WINPR_ATTR_UNUSED wSt
 		{
 			WLog_ERR(TAG, "client desktop resize callback failed");
 			return STATE_RUN_FAILED;
+		}
+
+		/* The codecs for bitmap updates and surface bits were sized for the
+		 * old desktop when connecting. The GFX codecs are reset by the GFX
+		 * channel on ResetGraphics instead. */
+		rdpCodecs* codecs = rdp->context->codecs;
+		if (codecs)
+		{
+			const UINT32 flags = FREERDP_CODEC_INTERLEAVED | FREERDP_CODEC_PLANAR |
+			                     FREERDP_CODEC_NSCODEC | FREERDP_CODEC_REMOTEFX;
+			if (!freerdp_client_codecs_reset(codecs, flags, rdp->settings->DesktopWidth,
+			                                 rdp->settings->DesktopHeight))
+			{
+				WLog_ERR(TAG, "failed to reset codecs to the new desktop size");
+				return STATE_RUN_FAILED;
+			}
 		}
 	}
 

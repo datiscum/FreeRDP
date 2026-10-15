@@ -254,8 +254,11 @@ const char* freerdp_passphrase_read_tty(rdpContext* context, const char* prompt,
 	if (!fp)
 		goto error;
 
-	(void)fprintf(fout, "%s", prompt);
-	(void)fflush(fout);
+	if (isatty(fileno(fp)))
+	{
+		(void)fprintf(fout, "%s", prompt);
+		(void)fflush(fout);
+	}
 
 	{
 		char* ptr = nullptr;
@@ -343,14 +346,14 @@ const char* freerdp_passphrase_read(rdpContext* context, const char* prompt, cha
 	return freerdp_passphrase_read_tty(context, prompt, buf, bufsiz, from_stdin);
 }
 
-static BOOL set_termianl_nonblock(int ifd, BOOL nonblock);
+static BOOL set_terminal_nonblock(int ifd, BOOL nonblock);
 
 static void restore_terminal(void)
 {
-	(void)set_termianl_nonblock(-1, FALSE);
+	(void)set_terminal_nonblock(-1, FALSE);
 }
 
-BOOL set_termianl_nonblock(int ifd, BOOL nonblock)
+BOOL set_terminal_nonblock(int ifd, BOOL nonblock)
 {
 	static int fd = -1;
 	static bool registered = false;
@@ -362,6 +365,9 @@ BOOL set_termianl_nonblock(int ifd, BOOL nonblock)
 
 	if (fd < 0)
 		return FALSE;
+
+	if (!isatty(fd))
+		return TRUE;
 
 	if (nonblock)
 	{
@@ -427,7 +433,7 @@ int freerdp_interruptible_getc(rdpContext* context, FILE* stream)
 	int rc = EOF;
 	const int fd = fileno(stream);
 
-	(void)set_termianl_nonblock(fd, TRUE);
+	(void)set_terminal_nonblock(fd, TRUE);
 
 	do
 	{
@@ -450,7 +456,7 @@ int freerdp_interruptible_getc(rdpContext* context, FILE* stream)
 		}
 	} while (!freerdp_shall_disconnect_context(context));
 
-	(void)set_termianl_nonblock(fd, FALSE);
+	(void)set_terminal_nonblock(fd, FALSE);
 
 	return rc;
 }
@@ -531,7 +537,7 @@ SSIZE_T freerdp_interruptible_get_line(rdpContext* context, char** plineptr, siz
 	{
 		if (used + 2 >= len)
 		{
-			len += step;
+			len = used + step;
 			n = realloc(ptr, len);
 
 			if (!n)

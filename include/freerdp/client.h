@@ -46,6 +46,7 @@
  * @since version 3.16.0
  */
 typedef struct MIBClientWrapper MIBClientWrapper;
+typedef struct AadAuthHelper AadAuthHelper;
 
 #ifdef __cplusplus
 extern "C"
@@ -114,6 +115,11 @@ extern "C"
 		ALIGN64 INT32 last_y;
 	} FreeRDP_PenDevice;
 
+	/**! @brief forward declaration of opaque handle for OAuth2 state handling
+	 * @since version 3.32.0
+	 */
+	typedef struct rdp_client_oauth2 rdpClientOAuth2;
+
 	struct rdp_client_context
 	{
 		rdpContext context;
@@ -145,15 +151,18 @@ extern "C"
 
 		ALIGN64 MIBClientWrapper* mibClientWrapper; /**< (offset 10) @since version 3.16.0 */
 		ALIGN64 BOOL pressed_buttons[5];            /**< (offset 11) @since version 3.17.0 */
-		UINT64 reserved[129 - 16];                  /**< (offset 16) */
+		ALIGN64 rdpClientOAuth2* oauth2;            /**< (offset 16) @since version 3.32.0 */
+		ALIGN64 AadAuthHelper* aadHelper;           /**< (offset 17) @since version 3.32.0 */
+		UINT64 reserved[129 - 18];                  /**< (offset 18) */
 	};
+
+	typedef BOOL (*window_events_fkt_t)(freerdp* instance);
 
 	/* Common client functions */
 
 	FREERDP_API void freerdp_client_context_free(rdpContext* context);
 
 	WINPR_ATTR_MALLOC(freerdp_client_context_free, 1)
-	WINPR_ATTR_NODISCARD
 	FREERDP_API rdpContext* freerdp_client_context_new(const RDP_CLIENT_ENTRY_POINTS* pEntryPoints);
 
 	WINPR_ATTR_NODISCARD
@@ -219,6 +228,47 @@ extern "C"
 	WINPR_ATTR_NODISCARD
 	FREERDP_API int client_cli_logon_error_info(freerdp* instance, UINT32 data, UINT32 type);
 
+	/** @brief AAD GetAccessToken implementation trying to utilize system specific OAuth2 handling
+	 * with your browser and fall back to CLI should that fail.
+	 *
+	 *   @param instance The instance to query for
+	 *   @param tokenType The type of token to request
+	 *   @param token A pointer to a location that will be set to the token requested
+	 *   @param count The number of arguments following
+	 *
+	 *   @return TRUE in case of successful token acquisition, FALSE otherwise
+	 *   @since version 3.32.0
+	 */
+	WINPR_ATTR_NODISCARD
+	FREERDP_API BOOL client_failsafe_get_access_token(freerdp* instance, AccessTokenType tokenType,
+	                                                  char** token, size_t count, ...);
+
+	/** @brief AAD GetAccessToken implementation trying to utilize system specific OAuth2 handling
+	 * with your browser.
+	 *
+	 *   @param instance The instance to query for
+	 *   @param tokenType The type of token to request
+	 *   @param token A pointer to a location that will be set to the token requested
+	 *   @param count The number of arguments following
+	 *
+	 *   @return TRUE in case of successful token acquisition, FALSE otherwise
+	 *   @since version 3.32.0
+	 */
+	WINPR_ATTR_NODISCARD
+	FREERDP_API BOOL client_helper_get_access_token(freerdp* instance, AccessTokenType tokenType,
+	                                                char** token, size_t count, ...);
+
+	/** @brief AAD GetAccessToken implementation printing the request to CLI and waiting for user
+	 * pasting the response back.
+	 *
+	 *   @param instance The instance to query for
+	 *   @param tokenType The type of token to request
+	 *   @param token A pointer to a location that will be set to the token requested
+	 *   @param count The number of arguments following
+	 *
+	 *   @return TRUE in case of successful token acquisition, FALSE otherwise
+	 *   @since version 3.0.0
+	 */
 	WINPR_ATTR_NODISCARD
 	FREERDP_API BOOL client_cli_get_access_token(freerdp* instance, AccessTokenType tokenType,
 	                                             char** token, size_t count, ...);
@@ -295,9 +345,15 @@ extern "C"
 	WINPR_ATTR_NODISCARD
 	FREERDP_API BOOL client_auto_reconnect(freerdp* instance);
 
+	/**
+	 * @brief Tries to reconnect a session that lost network
+	 *
+	 * @param instance The client instance to reconnect
+	 * @param window_events A function handling UI events. Will be run on a temporary thread.
+	 * return TRUE if successfully reconnected, FALSE otherwise
+	 */
 	WINPR_ATTR_NODISCARD
-	FREERDP_API BOOL client_auto_reconnect_ex(freerdp* instance,
-	                                          BOOL (*window_events)(freerdp* instance));
+	FREERDP_API BOOL client_auto_reconnect_ex(freerdp* instance, window_events_fkt_t window_events);
 
 	typedef enum
 	{
@@ -383,10 +439,23 @@ extern "C"
 	 *  @return An allocated string that can be used to connect
 	 *  @since version 3.16.0
 	 */
-	WINPR_ATTR_MALLOC(free, 1)
-	WINPR_ATTR_NODISCARD
+	WINPR_ATTR_MALLOC(winpr_zfree, 1)
 	FREERDP_API char* freerdp_client_get_aad_url(rdpClientContext* cctx,
 	                                             freerdp_client_aad_type type, ...);
+
+	/** Helper to retrieve the AAD access token from JSON input
+	 *
+	 *  @param cctx The client context holding the OAuth state
+	 *  @param data The response URL
+	 *  @param length The number of bytes of the JSON data
+	 *
+	 *  @since version 3.32.0
+	 *
+	 * @return The token string or \b nullptr
+	 */
+	WINPR_ATTR_MALLOC(winpr_zfree, 1)
+	FREERDP_API char* freerdp_client_extract_aad_code(rdpClientContext* cctx, const char* data,
+	                                                  size_t length);
 
 #ifdef __cplusplus
 }

@@ -129,6 +129,7 @@ static const struct info_flags_t info_flags[] = {
 	{ INFO_HIDEF_RAIL_SUPPORTED, "INFO_HIDEF_RAIL_SUPPORTED" },
 };
 
+WINPR_ATTR_NODISCARD
 static BOOL rdp_read_info_null_string(rdpSettings* settings, FreeRDP_Settings_Keys_String id,
                                       const char* what, UINT32 flags, wStream* s, size_t cbLen,
                                       size_t max)
@@ -151,7 +152,11 @@ static BOOL rdp_read_info_null_string(rdpSettings* settings, FreeRDP_Settings_Ke
 
 		if (unicode)
 		{
-			const WCHAR* domain = Stream_PointerAs(s, WCHAR);
+			WCHAR wstr[513] = WINPR_C_ARRAY_INIT;
+			WINPR_ASSERT(ARRAYSIZE(wstr) > max);
+			memcpy(wstr, Stream_Pointer(s), cbLen);
+
+			const WCHAR* domain = wstr;
 			if (!freerdp_settings_set_string_from_utf16N(settings, id, domain,
 			                                             cbLen / sizeof(WCHAR)))
 			{
@@ -340,7 +345,7 @@ static BOOL rdp_write_client_auto_reconnect_cookie(rdpRdp* rdp, wStream* s)
  * Get the cbClientAddress size limit
  * see [MS-RDPBCGR] 2.2.1.11.1.1.1 Extended Info Packet (TS_EXTENDED_INFO_PACKET)
  */
-
+WINPR_ATTR_NODISCARD
 static size_t rdp_get_client_address_max_size(const rdpRdp* rdp)
 {
 	UINT32 version = 0;
@@ -622,7 +627,7 @@ static BOOL rdp_write_extended_info_packet(rdpRdp* rdp, wStream* s)
 
 	if (freerdp_settings_get_bool(settings, FreeRDP_SupportDynamicTimeZone))
 	{
-		if (!Stream_EnsureRemainingCapacity(s, 8 + 254 * sizeof(WCHAR)))
+		if (!Stream_EnsureRemainingCapacity(s, 8ull + 254ull * sizeof(WCHAR)))
 			goto fail;
 
 		Stream_Write_UINT16(s, 0); /* reserved1 (2 bytes) */
@@ -639,7 +644,7 @@ static BOOL rdp_write_extended_info_packet(rdpRdp* rdp, wStream* s)
 				goto fail;
 			rlen = WINPR_ASSERTING_INT_CAST(size_t, wlen);
 		}
-		Stream_Write_UINT16(s, (UINT16)rlen * sizeof(WCHAR));
+		Stream_Write_UINT16(s, WINPR_ASSERTING_INT_CAST(UINT16, rlen) * sizeof(WCHAR));
 		if (Stream_Write_UTF16_String_From_UTF8(s, rlen, tz, rstrlen, FALSE) < 0)
 			goto fail;
 		Stream_Write_UINT16(s, settings->DynamicDaylightTimeDisabled ? 0x01 : 0x00);
@@ -652,6 +657,7 @@ fail:
 	return ret;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL rdp_read_info_string(rdpSettings* settings, FreeRDP_Settings_Keys_String id,
                                  UINT32 flags, wStream* s, size_t cbLenNonNull, size_t max)
 {
@@ -685,7 +691,11 @@ static BOOL rdp_read_info_string(rdpSettings* settings, FreeRDP_Settings_Keys_St
 
 		if (unicode)
 		{
-			const WCHAR* domain = Stream_PointerAs(s, WCHAR);
+			WCHAR wstr[513] = WINPR_C_ARRAY_INIT;
+			WINPR_ASSERT(ARRAYSIZE(wstr) > max);
+
+			memcpy(wstr, Stream_Pointer(s), cbLenNonNull);
+			const WCHAR* domain = wstr;
 			if (!freerdp_settings_set_string_from_utf16N(settings, id, domain,
 			                                             cbLenNonNull / sizeof(WCHAR)))
 				return FALSE;
@@ -807,7 +817,6 @@ static BOOL rdp_read_info_packet(rdpRdp* rdp, wStream* s, UINT16 tpktlength)
 static BOOL rdp_write_info_packet(rdpRdp* rdp, wStream* s)
 {
 	BOOL ret = FALSE;
-	UINT32 flags = 0;
 	WCHAR* domainW = nullptr;
 	size_t cbDomain = 0;
 	WCHAR* userNameW = nullptr;
@@ -819,15 +828,14 @@ static BOOL rdp_write_info_packet(rdpRdp* rdp, wStream* s)
 	WCHAR* workingDirW = nullptr;
 	size_t cbWorkingDir = 0;
 	BOOL usedPasswordCookie = FALSE;
-	rdpSettings* settings = nullptr;
 
 	WINPR_ASSERT(rdp);
-	settings = rdp->settings;
+	const rdpSettings* settings = rdp->settings;
 	WINPR_ASSERT(settings);
 
-	flags = INFO_MOUSE | INFO_UNICODE | INFO_LOGONERRORS | INFO_MAXIMIZESHELL |
-	        INFO_ENABLEWINDOWSKEY | INFO_DISABLECTRLALTDEL | INFO_MOUSE_HAS_WHEEL |
-	        INFO_FORCE_ENCRYPTED_CS_PDU;
+	UINT32 flags = INFO_MOUSE | INFO_UNICODE | INFO_LOGONERRORS | INFO_MAXIMIZESHELL |
+	               INFO_ENABLEWINDOWSKEY | INFO_DISABLECTRLALTDEL | INFO_MOUSE_HAS_WHEEL |
+	               INFO_FORCE_ENCRYPTED_CS_PDU;
 
 	if (settings->SmartcardLogon)
 	{
@@ -883,61 +891,66 @@ static BOOL rdp_write_info_packet(rdpRdp* rdp, wStream* s)
 		}
 	}
 
-	domainW = freerdp_settings_get_string_as_utf16(settings, FreeRDP_Domain, &cbDomain);
-	if (cbDomain > UINT16_MAX / sizeof(WCHAR))
+	if (!freerdp_settings_get_bool(settings, FreeRDP_RestrictedAdminModeRequired) &&
+	    !freerdp_settings_get_bool(settings, FreeRDP_DisableCredentialsDelegation))
 	{
-		WLog_ERR(TAG, "cbDomain > UINT16_MAX");
-		goto fail;
-	}
-	cbDomain *= sizeof(WCHAR);
-
-	/* user name provided by the expert for connecting to the novice computer */
-	userNameW = freerdp_settings_get_string_as_utf16(settings, FreeRDP_Username, &cbUserName);
-	if (cbUserName > UINT16_MAX / sizeof(WCHAR))
-	{
-		WLog_ERR(TAG, "cbUserName > UINT16_MAX");
-		goto fail;
-	}
-	cbUserName *= sizeof(WCHAR);
-
-	{
-		const char* pin = "*";
-		if (!settings->RemoteAssistanceMode)
+		domainW = freerdp_settings_get_string_as_utf16(settings, FreeRDP_Domain, &cbDomain);
+		if (cbDomain > UINT16_MAX / sizeof(WCHAR))
 		{
-			/* Ignore redirection password if we´re using smartcard and have the pin as password */
-			if (((flags & INFO_PASSWORD_IS_SC_PIN) == 0) && settings->RedirectionPassword &&
-			    (settings->RedirectionPasswordLength > 0))
-			{
-				union
-				{
-					BYTE* bp;
-					WCHAR* wp;
-				} ptrconv;
+			WLog_ERR(TAG, "cbDomain > UINT16_MAX");
+			goto fail;
+		}
+		cbDomain *= sizeof(WCHAR);
 
-				if (settings->RedirectionPasswordLength > UINT16_MAX)
+		/* user name provided by the expert for connecting to the novice computer */
+		userNameW = freerdp_settings_get_string_as_utf16(settings, FreeRDP_Username, &cbUserName);
+		if (cbUserName > UINT16_MAX / sizeof(WCHAR))
+		{
+			WLog_ERR(TAG, "cbUserName > UINT16_MAX");
+			goto fail;
+		}
+		cbUserName *= sizeof(WCHAR);
+
+		{
+			const char* pin = "*";
+			if (!settings->RemoteAssistanceMode)
+			{
+				/* Ignore redirection password if we´re using smartcard and have the pin as password
+				 */
+				if (((flags & INFO_PASSWORD_IS_SC_PIN) == 0) && settings->RedirectionPassword &&
+				    (settings->RedirectionPasswordLength > 0))
 				{
-					WLog_ERR(TAG, "RedirectionPasswordLength > UINT16_MAX");
+					union
+					{
+						BYTE* bp;
+						WCHAR* wp;
+					} ptrconv;
+
+					if (settings->RedirectionPasswordLength > UINT16_MAX)
+					{
+						WLog_ERR(TAG, "RedirectionPasswordLength > UINT16_MAX");
+						goto fail;
+					}
+					usedPasswordCookie = TRUE;
+
+					ptrconv.bp = settings->RedirectionPassword;
+					passwordW = ptrconv.wp;
+					cbPassword = (UINT16)settings->RedirectionPasswordLength;
+				}
+				else
+					pin = freerdp_settings_get_string(settings, FreeRDP_Password);
+			}
+
+			if (!usedPasswordCookie && pin)
+			{
+				passwordW = ConvertUtf8ToWCharAlloc(pin, &cbPassword);
+				if (cbPassword > UINT16_MAX / sizeof(WCHAR))
+				{
+					WLog_ERR(TAG, "cbPassword > UINT16_MAX");
 					goto fail;
 				}
-				usedPasswordCookie = TRUE;
-
-				ptrconv.bp = settings->RedirectionPassword;
-				passwordW = ptrconv.wp;
-				cbPassword = (UINT16)settings->RedirectionPasswordLength;
+				cbPassword = (UINT16)cbPassword * sizeof(WCHAR);
 			}
-			else
-				pin = freerdp_settings_get_string(settings, FreeRDP_Password);
-		}
-
-		if (!usedPasswordCookie && pin)
-		{
-			passwordW = ConvertUtf8ToWCharAlloc(pin, &cbPassword);
-			if (cbPassword > UINT16_MAX / sizeof(WCHAR))
-			{
-				WLog_ERR(TAG, "cbPassword > UINT16_MAX");
-				goto fail;
-			}
-			cbPassword = (UINT16)cbPassword * sizeof(WCHAR);
 		}
 	}
 
@@ -1049,7 +1062,8 @@ BOOL rdp_recv_client_info(rdpRdp* rdp, wStream* s)
 	UINT16 channelId = 0;
 	UINT16 securityFlags = 0;
 
-	WINPR_ASSERT(rdp_get_state(rdp) == CONNECTION_STATE_SECURE_SETTINGS_EXCHANGE);
+	if (!rdp_is_reached_state(rdp, CONNECTION_STATE_SECURE_SETTINGS_EXCHANGE))
+		return FALSE;
 
 	if (!rdp_read_header(rdp, s, &length, &channelId))
 		return FALSE;
@@ -1494,12 +1508,16 @@ static BOOL rdp_write_logon_info_v1(wStream* s, const logon_info* info)
 		if (len > charLen)
 			return FALSE;
 
-		const size_t wlen = len * sizeof(WCHAR);
+		const SSIZE_T wclen = ConvertUtf8NToWChar(info->domain, len, nullptr, 0);
+		if (wclen < 0)
+			return FALSE;
+		const size_t wzerolen = WINPR_ASSERTING_INT_CAST(size_t, wclen) + 1ull;
+		const size_t wlen = wzerolen * sizeof(WCHAR);
 		if (wlen > UINT32_MAX)
 			return FALSE;
 
 		Stream_Write_UINT32(s, (UINT32)wlen);
-		if (Stream_Write_UTF16_String_From_UTF8(s, charLen, info->domain, len, TRUE) < 0)
+		if (Stream_Write_UTF16_String_From_UTF8(s, wzerolen, info->domain, len, TRUE) < 0)
 			return FALSE;
 	}
 
@@ -1509,13 +1527,17 @@ static BOOL rdp_write_logon_info_v1(wStream* s, const logon_info* info)
 		if (len > userCharLen)
 			return FALSE;
 
-		const size_t wlen = len * sizeof(WCHAR);
+		const SSIZE_T wclen = ConvertUtf8NToWChar(info->username, len, nullptr, 0);
+		if (wclen < 0)
+			return FALSE;
+		const size_t wzerolen = WINPR_ASSERTING_INT_CAST(size_t, wclen) + 1ull;
+		const size_t wlen = wzerolen * sizeof(WCHAR);
 		if (wlen > UINT32_MAX)
 			return FALSE;
 
 		Stream_Write_UINT32(s, (UINT32)wlen);
 
-		if (Stream_Write_UTF16_String_From_UTF8(s, userCharLen, info->username, len, TRUE) < 0)
+		if (Stream_Write_UTF16_String_From_UTF8(s, wzerolen, info->username, len, TRUE) < 0)
 			return FALSE;
 	}
 
@@ -1549,7 +1571,7 @@ static BOOL rdp_write_logon_info_v2(wStream* s, const logon_info* info)
 			return FALSE;
 		domainLen = WINPR_ASSERTING_INT_CAST(size_t, wlen);
 	}
-	if (domainLen >= UINT32_MAX / sizeof(WCHAR))
+	if (domainLen >= (UINT32_MAX - 1) / sizeof(WCHAR))
 		return FALSE;
 	Stream_Write_UINT32(s, (UINT32)(domainLen + 1) * sizeof(WCHAR));
 
@@ -1561,7 +1583,7 @@ static BOOL rdp_write_logon_info_v2(wStream* s, const logon_info* info)
 			return FALSE;
 		usernameLen = WINPR_ASSERTING_INT_CAST(size_t, wlen);
 	}
-	if (usernameLen >= UINT32_MAX / sizeof(WCHAR))
+	if (usernameLen >= (UINT32_MAX - 1) / sizeof(WCHAR))
 		return FALSE;
 	Stream_Write_UINT32(s, (UINT32)(usernameLen + 1) * sizeof(WCHAR));
 	Stream_Seek(s, logonInfoV2ReservedSize);

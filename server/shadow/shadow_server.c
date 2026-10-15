@@ -654,6 +654,8 @@ int shadow_server_parse_command_line(rdpShadowServer* server, int argc, char** a
 	{
 		if (!freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE))
 			return COMMAND_LINE_ERROR;
+		if (!freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE))
+			return COMMAND_LINE_ERROR;
 	}
 	return status;
 }
@@ -1169,6 +1171,7 @@ rdpShadowServer* shadow_server_new(void)
 	server->h264BitRate = 10000000;
 	server->h264FrameRate = 30;
 	server->h264QP = 0;
+	server->h264HwAccel = FALSE;
 	server->authentication = TRUE;
 #if defined(WITH_GFX_AV1)
 	server->AV1BitRate = 500;

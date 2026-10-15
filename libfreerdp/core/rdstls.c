@@ -520,17 +520,20 @@ static BOOL rdstls_write_authentication_request_with_fedauth_token(rdpRdstls* rd
 		return FALSE;
 	}
 
-	const size_t wideLength = utf8Length + 1;
-	const size_t wideBytes = wideLength * sizeof(WCHAR);
+	const SSIZE_T wideLength = ConvertUtf8NToWChar(token, utf8Length, nullptr, 0);
+	if (wideLength < 0)
+		return FALSE;
+	const size_t wideLengthZero = WINPR_ASSERTING_INT_CAST(size_t, wideLength);
+	const size_t wideBytes = (wideLengthZero + 1ull) * sizeof(WCHAR);
 
-	if (!Stream_EnsureRemainingCapacity(s, 6 + wideBytes))
+	if (!Stream_EnsureRemainingCapacity(s, 6ull + wideBytes))
 		return FALSE;
 
 	Stream_Write_UINT16(s, RDSTLS_TYPE_AUTHREQ);
 	Stream_Write_UINT16(s, RDSTLS_DATA_FEDAUTH_TOKEN);
 	Stream_Write_UINT16(s, (UINT16)wideBytes);
 
-	return Stream_Write_UTF16_String_From_UTF8(s, wideLength, token, utf8Length, TRUE) >= 0;
+	return Stream_Write_UTF16_String_From_UTF8(s, wideLengthZero, token, utf8Length, TRUE) >= 0;
 }
 
 WINPR_ATTR_NODISCARD
@@ -612,7 +615,7 @@ static BOOL rdstls_are_some_versions_supported_(wLog* log, uint16_t version, BOO
 	return TRUE;
 }
 
-#define rdstls_is_version_supported(rdstls, versions) \
+#define rdstls_is_version_supported(rdstls, version) \
 	rdstls_is_version_supported_((rdstls), (version), __FILE__, __func__, __LINE__)
 WINPR_ATTR_NODISCARD
 static BOOL rdstls_is_version_supported_(rdpRdstls* rdstls, uint16_t version, const char* file,
@@ -841,7 +844,7 @@ static BOOL rdstls_process_authentication_request_with_cookie(rdpRdstls* rdstls,
 	if (!rdstls_check_state_requirements(rdstls, RDSTLS_STATE_AUTH_REQ))
 		return FALSE;
 
-	if (!Stream_CheckAndLogRequiredLengthWLog(rdstls->log, s, 2))
+	if (!Stream_CheckAndLogRequiredLengthWLog(rdstls->log, s, 4))
 		return FALSE;
 
 	const rdpSettings* settings = rdstls->context->settings;
@@ -875,7 +878,8 @@ static BOOL rdstls_process_authentication_request_with_cookie(rdpRdstls* rdstls,
 	}
 
 	WLog_Print(rdstls->log, WLOG_DEBUG, "RDSTLS Cookie matches. Grant access.");
-	return FALSE;
+	rdstls->resultCode = RDSTLS_RESULT_SUCCESS;
+	return TRUE;
 }
 
 WINPR_ATTR_NODISCARD

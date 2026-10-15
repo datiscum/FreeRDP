@@ -45,10 +45,12 @@ struct winpr_sam
 	FILE* fp;
 	char* line;
 	char* buffer;
+	size_t bufferlen;
 	char* context;
 	BOOL readOnly;
 };
 
+WINPR_ATTR_MALLOC(SamFreeEntry, 1)
 static WINPR_SAM_ENTRY* SamEntryFromDataA(LPCSTR User, DWORD UserLength, LPCSTR Domain,
                                           DWORD DomainLength)
 {
@@ -64,6 +66,7 @@ static WINPR_SAM_ENTRY* SamEntryFromDataA(LPCSTR User, DWORD UserLength, LPCSTR 
 	return entry;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL SamAreEntriesEqual(const WINPR_SAM_ENTRY* a, const WINPR_SAM_ENTRY* b)
 {
 	if (!a || !b)
@@ -101,6 +104,7 @@ WINPR_SAM* SamOpen(const char* filename, BOOL readOnly)
 		filename = allocatedFileName;
 	}
 
+	WLog_DBG(TAG, "Trying to open SAM file '%s'", filename);
 	if (readOnly)
 		fp = winpr_fopen(filename, "r");
 	else
@@ -110,30 +114,36 @@ WINPR_SAM* SamOpen(const char* filename, BOOL readOnly)
 		if (!fp)
 			fp = winpr_fopen(filename, "w+");
 	}
-	free(allocatedFileName);
 
-	if (fp)
-	{
-		sam = (WINPR_SAM*)calloc(1, sizeof(WINPR_SAM));
+	if (!fp)
+		goto fail;
 
-		if (!sam)
-		{
-			(void)fclose(fp);
-			return nullptr;
-		}
+	sam = (WINPR_SAM*)calloc(1, sizeof(WINPR_SAM));
+	if (!sam)
+		goto fail;
 
-		sam->readOnly = readOnly;
-		sam->fp = fp;
-	}
-	else
-	{
-		WLog_DBG(TAG, "Could not open SAM file!");
-		return nullptr;
-	}
+	sam->readOnly = readOnly;
+	sam->fp = fp;
 
+fail:
+	if (!fp || !sam)
+		WLog_DBG(TAG, "Could not open SAM file '%s'", filename);
+
+	if (fp && !sam)
+		(void)fclose(fp);
+	winpr_zfree(allocatedFileName);
 	return sam;
 }
 
+static void SamLookupFinish(WINPR_SAM* sam)
+{
+	winpr_znfree(sam->buffer, sam->bufferlen);
+	sam->buffer = nullptr;
+	sam->bufferlen = 0;
+	sam->line = nullptr;
+}
+
+WINPR_ATTR_NODISCARD
 static BOOL SamLookupStart(WINPR_SAM* sam)
 {
 	size_t readSize = 0;
@@ -152,12 +162,14 @@ static BOOL SamLookupStart(WINPR_SAM* sam)
 		return FALSE;
 
 	sam->context = nullptr;
-	sam->buffer = (char*)calloc((size_t)fileSize + 2, 1);
+	const size_t allocsize = WINPR_ASSERTING_INT_CAST(size_t, fileSize) + 2ull;
+	sam->buffer = (char*)calloc(allocsize, 1);
 
 	if (!sam->buffer)
 		return FALSE;
+	sam->bufferlen = allocsize;
 
-	readSize = fread(sam->buffer, (size_t)fileSize, 1, sam->fp);
+	readSize = fread(sam->buffer, sam->bufferlen - 2ull, 1, sam->fp);
 
 	if (!readSize)
 	{
@@ -167,8 +179,7 @@ static BOOL SamLookupStart(WINPR_SAM* sam)
 
 	if (readSize < 1)
 	{
-		free(sam->buffer);
-		sam->buffer = nullptr;
+		SamLookupFinish(sam);
 		return FALSE;
 	}
 
@@ -178,13 +189,23 @@ static BOOL SamLookupStart(WINPR_SAM* sam)
 	return TRUE;
 }
 
-static void SamLookupFinish(WINPR_SAM* sam)
+static void SamResetEntryUser(WINPR_SAM_ENTRY* entry)
 {
-	free(sam->buffer);
-	sam->buffer = nullptr;
-	sam->line = nullptr;
+	if (!entry)
+		return;
+
+	if (entry->UserLength > 0)
+		winpr_znfree(entry->User, entry->UserLength);
+	entry->User = nullptr;
+	entry->UserLength = 0;
+
+	if (entry->DomainLength > 0)
+		winpr_znfree(entry->Domain, entry->DomainLength);
+	entry->Domain = nullptr;
+	entry->DomainLength = 0;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL SamReadEntry(WINPR_SAM* sam, WINPR_SAM_ENTRY* entry)
 {
 	char* p[5] = WINPR_C_ARRAY_INIT;
@@ -260,19 +281,16 @@ static BOOL SamReadEntry(WINPR_SAM* sam, WINPR_SAM_ENTRY* entry)
 	return TRUE;
 
 fail:
-	free(entry->Domain);
-	free(entry->User);
-	entry->Domain = nullptr;
-	entry->User = nullptr;
-	entry->DomainLength = 0;
-	entry->UserLength = 0;
+	SamResetEntryUser(entry);
 	return FALSE;
 }
 
 void SamFreeEntry(WINPR_ATTR_UNUSED WINPR_SAM* sam, WINPR_SAM_ENTRY* entry)
 {
+	if (!entry)
+		return;
 	SamResetEntry(entry);
-	free(entry);
+	winpr_znfree(entry, sizeof(WINPR_SAM_ENTRY));
 }
 
 void SamResetEntry(WINPR_SAM_ENTRY* entry)
@@ -280,17 +298,7 @@ void SamResetEntry(WINPR_SAM_ENTRY* entry)
 	if (!entry)
 		return;
 
-	if (entry->UserLength)
-	{
-		free(entry->User);
-		entry->User = nullptr;
-	}
-
-	if (entry->DomainLength)
-	{
-		free(entry->Domain);
-		entry->Domain = nullptr;
-	}
+	SamResetEntryUser(entry);
 
 	ZeroMemory(entry->LmHash, sizeof(entry->LmHash));
 	ZeroMemory(entry->NtHash, sizeof(entry->NtHash));
@@ -370,10 +378,8 @@ WINPR_SAM_ENTRY* SamLookupUserW(WINPR_SAM* sam, LPCWSTR User, UINT32 UserLength,
 	entry = SamLookupUserA(sam, utfUser, (UINT32)userCharLen, utfDomain, (UINT32)domainCharLen);
 	if (entry)
 	{
-		free(entry->User);
-		free(entry->Domain);
-		entry->User = nullptr;
-		entry->Domain = nullptr;
+		SamResetEntryUser(entry);
+
 		if (User)
 			entry->User = (char*)winpr_wcsndup(User, UserLength / sizeof(WCHAR));
 		entry->UserLength = UserLength;
@@ -382,17 +388,17 @@ WINPR_SAM_ENTRY* SamLookupUserW(WINPR_SAM* sam, LPCWSTR User, UINT32 UserLength,
 		entry->DomainLength = DomainLength;
 	}
 fail:
-	free(utfUser);
-	free(utfDomain);
+	winpr_znfree(utfUser, userCharLen);
+	winpr_znfree(utfDomain, domainCharLen);
 	return entry;
 }
 
 void SamClose(WINPR_SAM* sam)
 {
-	if (sam != nullptr)
-	{
-		if (sam->fp)
-			(void)fclose(sam->fp);
-		free(sam);
-	}
+	if (!sam)
+		return;
+
+	if (sam->fp)
+		(void)fclose(sam->fp);
+	winpr_znfree(sam, sizeof(WINPR_SAM));
 }

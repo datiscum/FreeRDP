@@ -141,6 +141,8 @@ struct drdynvc_plugin
 	rdpContext* rdpcontext;
 
 	IWTSVirtualChannelManager* channel_mgr;
+	BOOL firstFlagReceived;
+	UINT32 totalLength;
 };
 
 #endif /* FREERDP_CHANNEL_DRDYNVC_CLIENT_MAIN_H */

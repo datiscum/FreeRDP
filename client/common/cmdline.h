@@ -29,7 +29,8 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Addin" },
 	{ "azure", COMMAND_LINE_VALUE_REQUIRED,
 	  "[tenantid:<id>],[use-tenantid[:[on|off]],[ad:<url>]"
-	  "[avd-access:<format string>],[avd-token:<format string>],[avd-scope:<format string>]",
+	  "[avd-access:<format string>],[avd-token:<format string>],[avd-scope:<format string>],"
+	  "[auth-helper:<path|autodetect>]",
 	  nullptr, nullptr, -1, nullptr, "AzureAD options" },
 	{ "action-script", COMMAND_LINE_VALUE_REQUIRED, "<file-name>", "~/.config/freerdp/action.sh",
 	  nullptr, -1, nullptr, "Action script" },
@@ -194,7 +195,7 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "g:<gateway>[:<port>],u:<user>,d:<domain>,p:<password>,usage-method:["
 	  "direct|detect],access-token:<"
 	  "token>,type:[rpc|http[,no-websockets][,extauth-sspi-ntlm]|auto[,no-websockets][,extauth-"
-	  "sspi-ntlm]]|arm,url:<wss://url>,bearer:<oauth2-bearer-token>",
+	  "sspi-ntlm]]|arm,url:<wss://url>,bearer:<oauth2-bearer-token>,timeout:<1-600000 ms>",
 	  nullptr, nullptr, -1, "gw", "Gateway Hostname" },
 #if defined(WITH_FREERDP_DEPRECATED_COMMANDLINE)
 	{ "g", COMMAND_LINE_VALUE_REQUIRED, "<gateway>[:<port>]", nullptr, nullptr, -1, nullptr,
@@ -355,8 +356,8 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	{ "multimedia", COMMAND_LINE_VALUE_OPTIONAL, "[sys:<sys>,][dev:<dev>,][decoder:<decoder>]",
 	  nullptr, nullptr, -1, "mmr", "[DEPRECATED], use /video] Redirect multimedia (video)" },
 #endif
-	{ "multimon", COMMAND_LINE_VALUE_OPTIONAL, "force", nullptr, nullptr, -1, nullptr,
-	  "Use multiple monitors" },
+	{ "multimon", COMMAND_LINE_VALUE_BOOL | COMMAND_LINE_VALUE_OPTIONAL, "on|off|force",
+	  BoolValueFalse, nullptr, -1, nullptr, "Use multiple monitors" },
 	{ "multitouch", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueFalse, nullptr, -1, nullptr,
 	  "Redirect multitouch input" },
 	{ "multitransport", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueTrue, nullptr, -1, nullptr,
@@ -441,7 +442,7 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Force specific protocol security. e.g. /sec:nla enables NLA and disables all others, while "
 	  "/sec:nla:[on|off] just toggles NLA" },
 #if defined(WITH_FREERDP_DEPRECATED_COMMANDLINE)
-	{ "sec-ext", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueFalse, nullptr, -1, nullptr,
+	{ "sec-ext", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueTrue, nullptr, -1, nullptr,
 	  "[DEPRECATED, use /sec:ext] NLA extended protocol security" },
 	{ "sec-nla", COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueTrue, nullptr, -1, nullptr,
 	  "[DEPRECATED, use /sec:nla] NLA protocol security" },
@@ -462,8 +463,9 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Shell working directory" },
 	{ "size", COMMAND_LINE_VALUE_REQUIRED, "<width>x<height> or <percent>%[wh]", "1024x768",
 	  nullptr, -1, nullptr, "Screen size" },
-	{ "smart-sizing", COMMAND_LINE_VALUE_OPTIONAL, "<width>x<height>", nullptr, nullptr, -1,
-	  nullptr, "Scale remote desktop to window size" },
+	{ "smart-sizing", COMMAND_LINE_VALUE_BOOL | COMMAND_LINE_VALUE_OPTIONAL,
+	  "<width>x<height>|on|off", BoolValueFalse, nullptr, -1, nullptr,
+	  "Scale remote desktop to window size" },
 	{ "smartcard", COMMAND_LINE_VALUE_OPTIONAL, "<str>[,<str>...]", nullptr, nullptr, -1, nullptr,
 	  "Redirect the smartcard devices containing any of the <str> in their names." },
 	{ "smartcard-logon", COMMAND_LINE_VALUE_OPTIONAL,
@@ -535,8 +537,8 @@ static const COMMAND_LINE_ARGUMENT_A global_cmd_args[] = {
 	  "Let server see real physical pointer button" },
 #ifdef CHANNEL_URBDRC_CLIENT
 	{ "usb", COMMAND_LINE_VALUE_REQUIRED,
-	  "[dbg,][id:<vid>:<pid>#...,][addr:<bus>:<addr>#...,][auto]", nullptr, nullptr, -1, nullptr,
-	  "Redirect USB device" },
+	  "[dbg,][id:<vid>:<pid>#...,][addr:<bus>:<addr>#...,][auto,][filter:<class>#...|none]",
+	  nullptr, nullptr, -1, nullptr, "Redirect USB device" },
 #endif
 	{ "v", COMMAND_LINE_VALUE_REQUIRED, "<server>[:port]", nullptr, nullptr, -1, nullptr,
 	  "Server hostname|URL|IPv4|IPv6 or vsock://<number> or /some/path/to/pipe or |:1234 to pass a "

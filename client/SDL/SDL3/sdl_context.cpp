@@ -31,17 +31,14 @@
 #include <scoped_guard.hpp>
 
 #include "dialogs/sdl_dialogs.hpp"
-
-#if defined(WITH_WEBVIEW)
-#include <aad/sdl_webview.hpp>
-#endif
+#include <freerdp/client/aad_helper.h>
 
 static constexpr auto sdl_allow_screensaver = "sdl-allow-screensaver";
 
 SdlContext::SdlContext(rdpContext* context)
     : _context(context), _log(WLog_Get(CLIENT_TAG("SDL"))), _cursor(nullptr, sdl_Pointer_FreeCopy),
       _rdpThreadRunning(false), _primary(nullptr, SDL_DestroySurface), _disp(this), _input(this),
-      _clip(this), _dialog(_log)
+      _clip(this), _rail(this), _dialog(_log)
 {
 	WINPR_ASSERT(context);
 	setMetadata();
@@ -60,12 +57,8 @@ SdlContext::SdlContext(rdpContext* context)
 	instance->PresentGatewayMessage = sdl_present_gateway_message;
 	instance->ChooseSmartcard = sdl_choose_smartcard;
 	instance->RetryDialog = sdl_retry_dialog;
+	instance->GetAccessToken = client_failsafe_get_access_token;
 
-#ifdef WITH_WEBVIEW
-	instance->GetAccessToken = sdl_webview_get_access_token;
-#else
-	instance->GetAccessToken = client_cli_get_access_token;
-#endif
 	/* TODO: Client display set up */
 
 	_args.push_back({ sdl_allow_screensaver, COMMAND_LINE_VALUE_BOOL, nullptr, BoolValueFalse,
@@ -464,8 +457,10 @@ bool SdlContext::updateWindowList()
 
 bool SdlContext::updateWindow(SDL_WindowID id)
 {
-	if (freerdp_settings_get_bool(_context->settings, FreeRDP_Fullscreen) ||
-	    freerdp_settings_get_bool(_context->settings, FreeRDP_UseMultimon))
+	/* In fullscreen the monitor kept the size measured with the probe window at startup and was
+	 * never updated, so a session the server started at another size stayed that way. Only the
+	 * window knows its real size, so ask it in fullscreen as well. */
+	if (freerdp_settings_get_bool(_context->settings, FreeRDP_UseMultimon))
 		return true;
 
 	auto& w = _windows.at(id);
@@ -848,20 +843,45 @@ SdlContext::updateDisplayOffsetsForNeighbours(SDL_DisplayID id,
 			continue;
 
 		bool neighbor = false;
-		if (alignX(entry.second.first, first.first))
+		const bool ax = alignX(entry.second.first, first.first);
+		const bool ay = alignY(entry.second.first, first.first);
+
+		/* Offset along the axis that does not touch, converted from logical to pixel
+		 * units of the reference display. Without this, a monitor that is adjacent on
+		 * one axis but shifted on the other (e.g. a wider monitor above another, or a
+		 * rotated monitor that is not top aligned) keeps offset 0 on that axis, the
+		 * layout sent to the server no longer matches the local one and pointer input
+		 * lands offset by that difference. */
+		auto crossOffset = [](int ePos, int fPos, int fLogical, int fPixel) -> int
+		{
+			if (fLogical <= 0)
+				return ePos - fPos;
+			return static_cast<int>(
+			    std::lround(static_cast<double>(ePos - fPos) * fPixel / fLogical));
+		};
+
+		if (ax)
 		{
 			if (entry.second.first.x < first.first.x)
 				entry.second.second.x = first.second.x - entry.second.second.w;
 			else
 				entry.second.second.x = first.second.x + first.second.w;
+			if (!ay)
+				entry.second.second.y =
+				    first.second.y +
+				    crossOffset(entry.second.first.y, first.first.y, first.first.h, first.second.h);
 			neighbor = true;
 		}
-		if (alignY(entry.second.first, first.first))
+		if (ay)
 		{
 			if (entry.second.first.y < first.first.y)
 				entry.second.second.y = first.second.y - entry.second.second.h;
 			else
 				entry.second.second.y = first.second.y + first.second.h;
+			if (!ax)
+				entry.second.second.x =
+				    first.second.x +
+				    crossOffset(entry.second.first.x, first.first.x, first.first.w, first.second.w);
 			neighbor = true;
 		}
 
@@ -1037,6 +1057,11 @@ sdlClip& SdlContext::getClipboardChannelContext()
 	return _clip;
 }
 
+SdlRail& SdlContext::getRailChannelContext()
+{
+	return _rail;
+}
+
 SdlConnectionDialogWrapper& SdlContext::getDialog()
 {
 	return _dialog;
@@ -1061,10 +1086,23 @@ bool SdlContext::moveMouseTo(const SDL_FPoint& pos)
 
 bool SdlContext::handleEvent(const SDL_MouseMotionEvent& ev)
 {
-	if (!getWindowForId(ev.windowID))
-		return true; /* Event for an untracked window (e.g. closed dialog) */
 	SDL_Event copy{};
 	copy.motion = ev;
+	/* WM owns the drag (#12447); backstop: button released but button-up swallowed by grab. */
+	if (_rail.enabled() && _rail.suppressServerMotion(ev.windowID))
+	{
+		if (!(SDL_GetGlobalMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK))
+			_rail.completeLocalMoveIfPending();
+		return true;
+	}
+	if (_rail.enabled() && _rail.translateToServer(ev.windowID, copy.motion.x, copy.motion.y))
+	{
+		_rail.noteServerPointer(copy.motion.x, copy.motion.y);
+		return SdlTouch::handleEvent(this, copy.motion);
+	}
+
+	if (!getWindowForId(ev.windowID))
+		return true; /* Event for an untracked window (e.g. closed dialog) */
 	if (!eventToPixelCoordinates(ev.windowID, copy))
 		return true;
 	removeLocalScaling(copy.motion.x, copy.motion.y);
@@ -1076,10 +1114,14 @@ bool SdlContext::handleEvent(const SDL_MouseMotionEvent& ev)
 
 bool SdlContext::handleEvent(const SDL_MouseWheelEvent& ev)
 {
-	if (!getWindowForId(ev.windowID))
-		return true;
 	SDL_Event copy{};
 	copy.wheel = ev;
+	if (_rail.enabled() &&
+	    _rail.translateToServer(ev.windowID, copy.wheel.mouse_x, copy.wheel.mouse_y))
+		return SdlTouch::handleEvent(this, copy.wheel);
+
+	if (!getWindowForId(ev.windowID))
+		return true;
 	if (!eventToPixelCoordinates(ev.windowID, copy))
 		return true;
 	removeLocalScaling(copy.wheel.mouse_x, copy.wheel.mouse_y);
@@ -1093,7 +1135,68 @@ bool SdlContext::handleEvent(const SDL_WindowEvent& ev)
 
 	auto window = getWindowForId(ev.windowID);
 	if (!window)
+	{
+		/* RAIL windows aren't in _windows; handle their events here. */
+		if (_rail.enabled() && _rail.ownsWindow(ev.windowID))
+		{
+			switch (ev.type)
+			{
+				case SDL_EVENT_WINDOW_MOUSE_ENTER:
+					/* Re-enter fires on move-grab end. */
+					if (!(SDL_GetGlobalMouseState(nullptr, nullptr) & SDL_BUTTON_LMASK))
+						_rail.completeLocalMoveIfPending(); /* X11 */
+					_rail.completeWaylandResize();          /* Wayland: compositor grab ended */
+					/* Restore the cursor or the pointer stays hidden over RemoteApp windows. */
+					return restoreCursor();
+				case SDL_EVENT_WINDOW_MOUSE_LEAVE:
+					/* Compositor took the pointer for the pending Wayland resize grab. */
+					_rail.noteResizeGrab(ev.windowID);
+					return true;
+				case SDL_EVENT_WINDOW_EXPOSED:
+					/* Force repaint for exposed windows; skip during local drag to avoid redundant
+					 * frames. */
+					if (!_rail.suppressServerInput(ev.windowID))
+						_rail.invalidateWindow(ev.windowID);
+					return true;
+				case SDL_EVENT_WINDOW_MAXIMIZED:
+					/* Maximize must complete move first. */
+					_rail.completeLocalMoveIfPending();
+					_rail.handleMaximized(ev.windowID);
+					return true;
+				case SDL_EVENT_WINDOW_MINIMIZED:
+					_rail.handleMinimized(ev.windowID);
+					return true;
+				case SDL_EVENT_WINDOW_RESTORED:
+					_rail.handleRestored(ev.windowID);
+					return true;
+				case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
+					/* Send SC_CLOSE, don't abort the session. */
+					_rail.handleClose(ev.windowID);
+					return true;
+				case SDL_EVENT_WINDOW_FOCUS_GAINED:
+					_rail.handleFocus(ev.windowID, true);
+					return true;
+				case SDL_EVENT_WINDOW_FOCUS_LOST:
+					_rail.handleFocus(ev.windowID, false);
+					return true;
+				case SDL_EVENT_WINDOW_MOVED:
+					if (!_rail.suppressServerInput(ev.windowID))
+						_rail.syncGeometry(ev.windowID);
+					return true;
+				case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+					/* No server frame during the drag: repaint synchronously each configure step;
+					 * also report the new size to catch a compositor snap/tile. */
+					_rail.noteDragResize(ev.windowID, ev.data1, ev.data2);
+					_rail.syncGeometry(ev.windowID);
+					_rail.handleWaylandResize(ev.windowID);
+					std::ignore = drawToWindows({});
+					return true;
+				default:
+					break;
+			}
+		}
 		return true;
+	}
 
 	{
 		const auto& r = window->rect();
@@ -1189,10 +1292,35 @@ bool SdlContext::handleEvent(const SDL_DisplayEvent& ev)
 
 bool SdlContext::handleEvent(const SDL_MouseButtonEvent& ev)
 {
-	if (!getWindowForId(ev.windowID))
-		return true;
 	SDL_Event copy = {};
 	copy.button = ev;
+	if (_rail.enabled())
+	{
+		/* Suppress X11 raw button during WM op. */
+		const bool suppress = _rail.suppressServerInput(ev.windowID);
+		if (ev.type == SDL_EVENT_MOUSE_BUTTON_UP)
+			_rail.completeLocalMoveIfPending();
+		/* Backstop for a Wayland resize whose MOUSE_ENTER completion never arrived; a fresh press
+		 * proves the old grab is over, so a no-op click grab is cancelled here too. */
+		if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+			_rail.completeWaylandResize(true);
+		/* activate the clicked window before forwarding, so the click routes to it. */
+		if (ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+			_rail.ensureActive(ev.windowID);
+		if (suppress)
+			return true;
+		if (_rail.translateToServer(ev.windowID, copy.button.x, copy.button.y))
+		{
+			/* Record the forwarded left press: it is the anchor of any server modal move/size
+			 * loop this press starts (the loop moves the window by release - anchor). */
+			if ((ev.type == SDL_EVENT_MOUSE_BUTTON_DOWN) && (ev.button == SDL_BUTTON_LEFT))
+				_rail.noteLeftPress(copy.button.x, copy.button.y);
+			return SdlTouch::handleEvent(this, copy.button);
+		}
+	}
+
+	if (!getWindowForId(ev.windowID))
+		return true;
 	if (!eventToPixelCoordinates(ev.windowID, copy))
 		return true;
 	removeLocalScaling(copy.button.x, copy.button.y);
@@ -1303,7 +1431,12 @@ SDL_FPoint SdlContext::screenToPixel(SDL_WindowID id, const SDL_FPoint& pos)
 {
 	auto w = getWindowForId(id);
 	if (!w)
+	{
+		/* RAIL windows are server-authoritative 1:1 (no local scaling) and not in _windows. */
+		if (_rail.enabled() && _rail.ownsWindow(id))
+			return pos;
 		return {};
+	}
 
 	/* Ignore errors here, sometimes SDL has no renderer */
 	auto renderer = w->renderer();
@@ -1321,7 +1454,11 @@ SDL_FPoint SdlContext::pixelToScreen(SDL_WindowID id, const SDL_FPoint& pos)
 {
 	auto w = getWindowForId(id);
 	if (!w)
+	{
+		if (_rail.enabled() && _rail.ownsWindow(id))
+			return pos;
 		return {};
+	}
 
 	/* Ignore errors here, sometimes SDL has no renderer */
 	auto renderer = w->renderer();
@@ -1508,12 +1645,46 @@ bool SdlContext::useLocalScale() const
 
 bool SdlContext::drawToWindows(const std::vector<SDL_Rect>& rects)
 {
-	if (rects.empty())
+	/* RAIL damage is per-window (_gfxDamage), not in the rects queue: repaint every tick. */
+	if (_rail.enabled())
+	{
+		for (auto& window : _windows)
+		{
+			if ((SDL_GetWindowFlags(window.second.window()) & SDL_WINDOW_HIDDEN) == 0)
+				SDL_HideWindow(window.second.window());
+		}
+
+		std::unique_lock lock(_critical);
+		_rail.paint(_primary.get(), pixelFormat(), rects);
 		return true;
+	}
+
+	/* Non-RAIL mode (e.g. Non-Monitored Desktop during UAC / Consent UI): show the desktop window.
+	 */
+	bool firstShow = false;
+	for (auto& window : _windows)
+	{
+		if (SDL_GetWindowFlags(window.second.window()) & SDL_WINDOW_HIDDEN)
+		{
+			SDL_ShowWindow(window.second.window());
+			SDL_RaiseWindow(window.second.window());
+			firstShow = true;
+		}
+	}
+
+	if (rects.empty() && !firstShow)
+		return true;
+
+	std::vector<SDL_Rect> drawRects = rects;
+	{
+		std::unique_lock lock(_critical);
+		if ((drawRects.empty() || firstShow) && _primary)
+			drawRects = { { 0, 0, _primary->w, _primary->h } };
+	}
 
 	for (auto& window : _windows)
 	{
-		if (!drawToWindow(window.second, rects))
+		if (!drawToWindow(window.second, drawRects))
 			return false;
 	}
 
@@ -1575,6 +1746,10 @@ bool SdlContext::redraw(bool suppress) const
 	if (!_connected)
 		return true;
 
+	/* In RAIL mode, hiding the desktop window must not suppress server output. */
+	if (suppress && _rail.enabled())
+		return true;
+
 	auto gdi = context()->gdi;
 	WINPR_ASSERT(gdi);
 	return gdi_send_suppress_output(gdi, suppress);
@@ -1624,7 +1799,7 @@ rdpPointer* SdlContext::cursor() const
 
 bool SdlContext::restoreCursor()
 {
-	WLog_Print(getWLog(), WLOG_DEBUG, "restore cursor: %d", _cursorType);
+	WLog_Print(getWLog(), WLOG_TRACE, "restore cursor: %d", _cursorType);
 	switch (_cursorType)
 	{
 		case CURSOR_NULL:

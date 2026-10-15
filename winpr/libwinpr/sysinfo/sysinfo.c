@@ -165,10 +165,22 @@ static WORD GetProcessorArchitecture(void)
 			return PROCESSOR_ARCHITECTURE_AMD64;
 		case CPU_TYPE_ARM:
 			return PROCESSOR_ARCHITECTURE_ARM;
+#ifdef CPU_TYPE_ARM64
 		case CPU_TYPE_ARM64:
 			return PROCESSOR_ARCHITECTURE_ARM64;
+#endif
+#ifdef CPU_TYPE_ARM64_32
 		case CPU_TYPE_ARM64_32:
 			return PROCESSOR_ARCHITECTURE_ARM;
+#endif
+#ifdef CPU_TYPE_POWERPC
+		case CPU_TYPE_POWERPC:
+			return PROCESSOR_ARCHITECTURE_PPC;
+#endif
+#ifdef CPU_TYPE_POWERPC64
+		case CPU_TYPE_POWERPC64:
+			return PROCESSOR_ARCHITECTURE_PPC;
+#endif
 		default:
 			return PROCESSOR_ARCHITECTURE_UNKNOWN;
 	}
@@ -605,7 +617,7 @@ static BOOL sysinfo_read_sysfs_string(const char* path, char* buffer, size_t siz
 
 static BOOL sysinfo_read_sysfs_int(const char* path, long long* value)
 {
-	char buffer[64] = { 0 };
+	char buffer[64] = WINPR_C_ARRAY_INIT;
 	if (!sysinfo_read_sysfs_string(path, buffer, sizeof(buffer)))
 		return FALSE;
 
@@ -645,8 +657,8 @@ static BOOL sysinfo_get_power_status_platform(LPSYSTEM_POWER_STATUS status)
 	// NOLINTNEXTLINE(concurrency-mt-unsafe): dir is a local DIR*, not shared across threads
 	while ((entry = readdir(dir)) != nullptr)
 	{
-		char path[PATH_MAX] = { 0 };
-		char value[64] = { 0 };
+		char path[PATH_MAX] = WINPR_C_ARRAY_INIT;
+		char value[64] = WINPR_C_ARRAY_INIT;
 		long long v = 0;
 
 		if (entry->d_name[0] == '.')

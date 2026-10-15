@@ -15,7 +15,6 @@
 #import "PerformanceEditorController.h"
 #import "CredentialsEditorController.h"
 #import "AdvancedBookmarkEditorController.h"
-#import "BlockAlertView.h"
 
 @implementation BookmarkEditorController
 
@@ -31,7 +30,7 @@
 
 - (id)initWithBookmark:(ComputerBookmark *)bookmark
 {
-	if ((self = [super initWithStyle:UITableViewStyleGrouped]))
+	if ((self = [super initWithStyle:UITableViewStyleInsetGrouped]))
 	{
 		// set additional settings state according to bookmark data
 		if ([[bookmark uuid] length] == 0)
@@ -61,7 +60,7 @@
 	                                     action:@selector(handleSave:)] autorelease];
 	UIBarButtonItem *cancelButton =
 	    [[[UIBarButtonItem alloc] initWithTitle:NSLocalizedString(@"Cancel", @"Cancel Button title")
-	                                      style:UIBarButtonItemStyleBordered
+	                                      style:UIBarButtonItemStylePlain
 	                                     target:self
 	                                     action:@selector(handleCancel:)] autorelease];
 	[[self navigationItem] setLeftBarButtonItem:cancelButton];
@@ -224,8 +223,6 @@
 			NSLog(@"Invalid row index in settings table!");
 			break;
 	}
-
-	[self adjustEditTextTableViewCell:textCell];
 }
 
 // updates credentials in the UI
@@ -235,9 +232,9 @@
 	switch (indexPath.row)
 	{
 		case 0:
-			[[selCell label]
-			    setText:NSLocalizedString(@"Credentials", @"'Credentials': Bookmark credentials")];
-			[[selCell selection] setText:[_params StringForKey:@"username"]];
+			[selCell
+			    setTitle:NSLocalizedString(@"Credentials", @"'Credentials': Bookmark credentials")];
+			[selCell setValue:[_params StringForKey:@"username"]];
 			break;
 		default:
 			NSLog(@"Invalid row index in settings table!");
@@ -253,29 +250,26 @@
 		case 0:
 		{
 			EditSelectionTableViewCell *selCell = (EditSelectionTableViewCell *)cell;
-			[[selCell label]
-			    setText:NSLocalizedString(@"Screen", @"'Screen': Bookmark Screen settings")];
+			[selCell setTitle:NSLocalizedString(@"Screen", @"'Screen': Bookmark Screen settings")];
 			NSString *resolution = ScreenResolutionDescription(
 			    [_params intForKey:@"screen_resolution_type"], [_params intForKey:@"width"],
 			    [_params intForKey:@"height"]);
 			int colorBits = [_params intForKey:@"colors"];
-			[[selCell selection]
-			    setText:[NSString stringWithFormat:@"%@@%d", resolution, colorBits]];
+			[selCell setValue:[NSString stringWithFormat:@"%@@%d", resolution, colorBits]];
 			break;
 		}
 		case 1:
 		{
 			EditSubEditTableViewCell *editCell = (EditSubEditTableViewCell *)cell;
-			[[editCell label]
-			    setText:NSLocalizedString(@"Performance",
-			                              @"'Performance': Bookmark Performance Settings")];
+			[editCell setTitle:NSLocalizedString(@"Performance",
+			                                     @"'Performance': Bookmark Performance Settings")];
 			break;
 		}
 		case 2:
 		{
 			EditSubEditTableViewCell *editCell = (EditSubEditTableViewCell *)cell;
-			[[editCell label]
-			    setText:NSLocalizedString(@"Advanced", @"'Advanced': Bookmark Advanced Settings")];
+			[editCell
+			    setTitle:NSLocalizedString(@"Advanced", @"'Advanced': Bookmark Advanced Settings")];
 			break;
 		}
 		default:
@@ -376,20 +370,26 @@
 	if ([[_bookmark label] length] == 0 || [[_params StringForKey:@"hostname"] length] == 0 ||
 	    [_params intForKey:@"port"] == 0)
 	{
-		BlockAlertView *alertView = [BlockAlertView
-		    alertWithTitle:NSLocalizedString(@"Cancel without saving?",
-		                                     @"Incomplete bookmark error title")
-		           message:NSLocalizedString(@"Press 'Cancel' to abort!\nPress 'Continue' to "
-		                                     @"specify the required fields!",
-		                                     @"Incomplete bookmark error message")];
+		UIAlertController *alertView = [UIAlertController
+		    alertControllerWithTitle:NSLocalizedString(@"Cancel without saving?",
+		                                               @"Incomplete bookmark error title")
+		                     message:NSLocalizedString(
+		                                 @"Press 'Cancel' to abort!\nPress 'Continue' to "
+		                                 @"specify the required fields!",
+		                                 @"Incomplete bookmark error message")
+		              preferredStyle:UIAlertControllerStyleAlert];
 		[alertView
-		    setCancelButtonWithTitle:NSLocalizedString(@"Cancel", @"Cancel Button")
-		                       block:^{
-			                       // cancel bookmark editing and return to previous view controller
-			                       [[self navigationController] popViewControllerAnimated:YES];
-		                       }];
-		[alertView addButtonWithTitle:NSLocalizedString(@"Continue", @"Continue Button") block:nil];
-		[alertView show];
+		    addAction:[UIAlertAction actionWithTitle:NSLocalizedString(@"Cancel", @"Cancel Button")
+		                                       style:UIAlertActionStyleCancel
+		                                     handler:^(UIAlertAction *action) {
+			                                     [[self navigationController]
+			                                         popViewControllerAnimated:YES];
+		                                     }]];
+		[alertView addAction:[UIAlertAction
+		                         actionWithTitle:NSLocalizedString(@"Continue", @"Continue Button")
+		                                   style:UIAlertActionStyleDefault
+		                                 handler:nil]];
+		[self presentViewController:alertView animated:YES completion:nil];
 		return;
 	}
 
@@ -420,8 +420,8 @@
 
 - (void)dealloc
 {
-	[super dealloc];
 	[_bookmark autorelease];
+	[super dealloc];
 }
 
 @end

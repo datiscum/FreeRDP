@@ -514,6 +514,8 @@ typedef struct
 	rdpContext* ctx;
 	LPVOID userdata;
 	MsgHandler msg_handler;
+	BOOL firstFlagReceived;
+	UINT32 totalLength;
 } msg_proc_internals;
 
 static DWORD WINAPI channel_client_thread_proc(LPVOID userdata)
@@ -657,13 +659,18 @@ UINT channel_client_post_message(void* MsgsHandle, LPVOID pData, UINT32 dataLeng
 
 	if (dataFlags & CHANNEL_FLAG_FIRST)
 	{
+		if (internals->firstFlagReceived)
+			return ERROR_INVALID_DATA;
+		internals->firstFlagReceived = TRUE;
+
 		if (internals->data_in)
 		{
-			if (!Stream_EnsureCapacity(internals->data_in, totalLength))
+			if (!Stream_EnsureCapacity(internals->data_in, dataLength))
 				return CHANNEL_RC_NO_MEMORY;
 		}
 		else
-			internals->data_in = Stream_New(nullptr, totalLength);
+			internals->data_in = Stream_New(nullptr, dataLength);
+		internals->totalLength = totalLength;
 	}
 
 	if (!(data_in = internals->data_in))
@@ -681,14 +688,29 @@ UINT channel_client_post_message(void* MsgsHandle, LPVOID pData, UINT32 dataLeng
 
 	Stream_Write(data_in, pData, dataLength);
 
+	if ((Stream_GetPosition(data_in) > totalLength) || (internals->totalLength != totalLength))
+	{
+		Stream_Free(internals->data_in, TRUE);
+		internals->data_in = nullptr;
+		return ERROR_INVALID_DATA;
+	}
+
 	if (dataFlags & CHANNEL_FLAG_LAST)
 	{
-		if (Stream_Capacity(data_in) != Stream_GetPosition(data_in))
+		if (!internals->firstFlagReceived)
+			return ERROR_INVALID_DATA;
+		internals->firstFlagReceived = FALSE;
+
+		if (!data_in)
+			return ERROR_INVALID_DATA;
+
+		if (internals->totalLength != Stream_GetPosition(data_in))
 		{
 			WLog_ERR(TAG, "%s_plugin_process_received: read error", internals->channel_name);
 			return ERROR_INTERNAL_ERROR;
 		}
 
+		internals->totalLength = 0;
 		internals->data_in = nullptr;
 		Stream_SealLength(data_in);
 		Stream_ResetPosition(data_in);

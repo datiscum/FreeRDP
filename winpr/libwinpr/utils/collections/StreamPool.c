@@ -28,9 +28,14 @@
 #include "../log.h"
 #define XTAG WINPR_TAG("utils.streampool")
 
+#if !defined(STREAMPOOL_SIZE_LIMIT)
+#error "CMake must define STREAMPOOL_SIZE_LIMIT=<unsigned>"
+#endif
+static const size_t POOL_COMMON_LIMIT = STREAMPOOL_SIZE_LIMIT;
+
 struct s_StreamPoolEntry
 {
-#if defined(WITH_STREAMPOOL_DEBUG)
+#if defined(WITH_DEBUG_STREAMPOOL)
 	char** msg;
 	size_t lines;
 #endif
@@ -58,7 +63,7 @@ static void discard_entry(struct s_StreamPoolEntry* entry, BOOL discardStream)
 	if (!entry)
 		return;
 
-#if defined(WITH_STREAMPOOL_DEBUG)
+#if defined(WITH_DEBUG_STREAMPOOL)
 	free((void*)entry->msg);
 #endif
 
@@ -73,7 +78,7 @@ static struct s_StreamPoolEntry add_entry(wStream* s)
 {
 	struct s_StreamPoolEntry entry = WINPR_C_ARRAY_INIT;
 
-#if defined(WITH_STREAMPOOL_DEBUG)
+#if defined(WITH_DEBUG_STREAMPOOL)
 	void* stack = winpr_backtrace(20);
 	if (stack)
 		entry.msg = winpr_backtrace_symbols(stack, &entry.lines);
@@ -104,6 +109,14 @@ static inline void StreamPool_Unlock(wStreamPool* pool)
 	WINPR_ASSERT(pool);
 	if (pool->synchronized)
 		LeaveCriticalSection(&pool->lock);
+}
+
+static BOOL StreamPool_ShrinkToCommonLimit(wStream* s)
+{
+	if (Stream_Capacity(s) <= POOL_COMMON_LIMIT)
+		return TRUE;
+
+	return Stream_ResizeToCapacity(s, POOL_COMMON_LIMIT);
 }
 
 static BOOL StreamPool_EnsureCapacity(wStreamPool* pool, size_t count, BOOL usedOrAvailable)
@@ -274,6 +287,7 @@ static void StreamPool_Remove(wStreamPool* pool, wStream* s)
 {
 	StreamPool_EnsureCapacity(pool, 1, FALSE);
 	Stream_EnsureValidity(s);
+	StreamPool_ShrinkToCommonLimit(s);
 	for (size_t x = 0; x < pool->aSize; x++)
 	{
 		wStream* cs = pool->aArray[x].s;
@@ -463,7 +477,7 @@ char* StreamPool_GetStatistics(wStreamPool* pool, char* buffer, size_t size)
 	if ((offset > 0) && ((size_t)offset < size))
 		used += (size_t)offset;
 
-#if defined(WITH_STREAMPOOL_DEBUG)
+#if defined(WITH_DEBUG_STREAMPOOL)
 	StreamPool_Lock(pool);
 
 	offset = _snprintf(&buffer[used], size - 1 - used, "\n-- dump used array take locations --\n");

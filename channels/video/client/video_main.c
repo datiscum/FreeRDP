@@ -34,6 +34,7 @@
 #include <winpr/interlocked.h>
 #include <winpr/sysinfo.h>
 
+#include <freerdp/freerdp.h>
 #include <freerdp/addin.h>
 #include <freerdp/primitives.h>
 #include <freerdp/client/channels.h>
@@ -60,6 +61,8 @@ typedef struct
 	VideoClientContext* context;
 	BOOL initialized;
 	rdpContext* rdpcontext;
+	BOOL connected;
+	BOOL dataConnected;
 } VIDEO_PLUGIN;
 
 #define XF_VIDEO_UNLIMITED_RATE 31
@@ -134,16 +137,15 @@ static void video_client_context_set_geometry(VideoClientContext* video,
 {
 	WINPR_ASSERT(video);
 	WINPR_ASSERT(video->priv);
+
 	video->priv->geometry = geometry;
 }
 
 WINPR_ATTR_MALLOC(VideoClientContextPriv_free, 1)
 static VideoClientContextPriv* VideoClientContextPriv_new(VideoClientContext* video)
 {
-	VideoClientContextPriv* ret = nullptr;
-
 	WINPR_ASSERT(video);
-	ret = calloc(1, sizeof(*ret));
+	VideoClientContextPriv* ret = calloc(1, sizeof(*ret));
 	if (!ret)
 		return nullptr;
 
@@ -213,15 +215,19 @@ WINPR_ATTR_MALLOC(PresentationContext_free, 1)
 static PresentationContext* PresentationContext_new(VideoClientContext* video, BYTE PresentationId,
                                                     UINT32 x, UINT32 y, UINT32 width, UINT32 height)
 {
-	size_t s = 4ULL * width * height;
-	PresentationContext* ret = nullptr;
+	if ((width == 0) || (height == 0))
+	{
+		WLog_ERR(TAG, "width==%" PRIu32 ", height=%" PRIu32, width, height);
+		return nullptr;
+	}
+	const size_t s = 4ULL * width * height;
 
 	WINPR_ASSERT(video);
 
 	if (s > INT32_MAX)
 		return nullptr;
 
-	ret = calloc(1, sizeof(*ret));
+	PresentationContext* ret = calloc(1, sizeof(*ret));
 	if (!ret)
 		return nullptr;
 
@@ -234,6 +240,14 @@ static PresentationContext* PresentationContext_new(VideoClientContext* video, B
 		WLog_ERR(TAG, "unable to create a h264 context");
 		goto fail;
 	}
+
+	VIDEO_PLUGIN* plugin = (VIDEO_PLUGIN*)video->handle;
+	WINPR_ASSERT(plugin);
+	WINPR_ASSERT(plugin->rdpcontext);
+	if (!h264_context_set_option(ret->h264, H264_CONTEXT_OPTION_HW_ACCEL,
+	                             (UINT32)freerdp_settings_get_bool(plugin->rdpcontext->settings,
+	                                                               FreeRDP_SoftwareGdi) == 0))
+		goto fail;
 	if (!h264_context_reset(ret->h264, width, height))
 		goto fail;
 
@@ -414,10 +428,31 @@ static BOOL video_onMappedGeometryUpdate(MAPPED_GEOMETRY* geometry)
 	         r->x, r->y, r->width, r->height);
 
 	WINPR_ASSERT(presentation->surface);
-	presentation->surface->x =
-	    WINPR_ASSERTING_INT_CAST(uint32_t, geometry->topLevelLeft + geometry->left);
-	presentation->surface->y =
-	    WINPR_ASSERTING_INT_CAST(uint32_t, geometry->topLevelTop + geometry->top);
+	if (geometry->topLevelLeft < 0)
+	{
+		WLog_ERR(TAG, "geometry->topLevelLeft=%d < 0", geometry->topLevelLeft);
+		return FALSE;
+	}
+	if (geometry->left < 0)
+	{
+		WLog_ERR(TAG, "geometry->left=%d < 0", geometry->left);
+		return FALSE;
+	}
+	presentation->surface->x = WINPR_ASSERTING_INT_CAST(uint32_t, geometry->topLevelLeft) +
+	                           WINPR_ASSERTING_INT_CAST(uint32_t, geometry->left);
+
+	if (geometry->topLevelTop < 0)
+	{
+		WLog_ERR(TAG, "geometry->topLevelTop=%d < 0", geometry->topLevelTop);
+		return FALSE;
+	}
+	if (geometry->top < 0)
+	{
+		WLog_ERR(TAG, "geometry->top=%d < 0", geometry->top);
+		return FALSE;
+	}
+	presentation->surface->y = WINPR_ASSERTING_INT_CAST(uint32_t, geometry->topLevelTop) +
+	                           WINPR_ASSERTING_INT_CAST(uint32_t, geometry->top);
 
 	return TRUE;
 }
@@ -486,6 +521,16 @@ static UINT video_PresentationRequest(VideoClientContext* video,
 		}
 
 		WLog_DBG(TAG, "creating presentation 0x%x", req->PresentationId);
+		if ((geom->topLevelLeft < 0) || (geom->left < 0) || (geom->topLevelTop < 0) ||
+		    (geom->top < 0))
+		{
+			WLog_ERR(TAG,
+			         "geometry: topLevelLeft=%" PRId32 " < 0, left=%" PRId32
+			         " < 0, topLevelTop=%" PRId32 " < 0, top=%" PRId32 " < 0",
+			         geom->topLevelLeft, geom->left, geom->topLevelTop, geom->top);
+			goto fail;
+		}
+
 		priv->currentPresentation = PresentationContext_new(
 		    video, req->PresentationId,
 		    WINPR_ASSERTING_INT_CAST(uint32_t, geom->topLevelLeft + geom->left),
@@ -555,6 +600,15 @@ static UINT video_read_tsmm_presentation_req(VideoClientContext* context, wStrea
 	Stream_Read_UINT32(s, req.SourceHeight);
 	Stream_Read_UINT32(s, req.ScaledWidth);
 	Stream_Read_UINT32(s, req.ScaledHeight);
+	if ((req.ScaledWidth == 0) || (req.SourceHeight == 0) || (req.ScaledWidth == 0) ||
+	    (req.ScaledHeight == 0))
+	{
+		WLog_ERR(TAG,
+		         "SourceWidth=%" PRIu32 ", SourceHeight=%" PRIu32 ", ScaledWidth=%" PRIu32
+		         ", ScaledHeight=%" PRIu32,
+		         req.SourceWidth, req.SourceHeight, req.ScaledWidth, req.ScaledHeight);
+		return ERROR_INVALID_DATA;
+	}
 	Stream_Read_UINT64(s, req.hnsTimestampOffset);
 	Stream_Read_UINT64(s, req.GeometryMappingId);
 	Stream_Read(s, req.VideoSubtypeId, 16);
@@ -821,17 +875,21 @@ static UINT video_VideoData(VideoClientContext* context, const TSMM_VIDEO_DATA* 
 	VideoClientContextPriv* priv = context->priv;
 	WINPR_ASSERT(priv);
 
+	EnterCriticalSection(&priv->framesLock);
 	PresentationContext* presentation = priv->currentPresentation;
 	if (!presentation)
 	{
 		WLog_ERR(TAG, "no current presentation");
+		LeaveCriticalSection(&priv->framesLock);
 		return CHANNEL_RC_OK;
 	}
 
 	if (!PresentationContext_ref(presentation))
+	{
+		LeaveCriticalSection(&priv->framesLock);
 		return ERROR_INTERNAL_ERROR;
+	}
 
-	EnterCriticalSection(&priv->framesLock);
 	if (presentation->PresentationId != data->PresentationId)
 	{
 		WLog_ERR(TAG, "current presentation id=%" PRIu8 " doesn't match data id=%" PRIu8,
@@ -854,6 +912,8 @@ static UINT video_VideoData(VideoClientContext* context, const TSMM_VIDEO_DATA* 
 		H264_CONTEXT* h264 = presentation->h264;
 		const UINT64 startTime = winpr_GetTickCount64NS();
 		MAPPED_GEOMETRY* geom = presentation->geometry;
+		if (!geom)
+			goto out;
 
 		const RECTANGLE_16 rect = { 0, 0, WINPR_ASSERTING_INT_CAST(UINT16, surface->alignedWidth),
 			                        WINPR_ASSERTING_INT_CAST(UINT16, surface->alignedHeight) };
@@ -986,6 +1046,8 @@ static UINT video_control_on_close(IWTSVirtualChannelCallback* pChannelCallback)
 		{
 			video->control_callback->channel_callback = nullptr;
 		}
+		if (video)
+			video->connected = FALSE;
 	}
 	free(pChannelCallback);
 	return CHANNEL_RC_OK;
@@ -1002,6 +1064,9 @@ static UINT video_data_on_close(IWTSVirtualChannelCallback* pChannelCallback)
 		{
 			video->data_callback->channel_callback = nullptr;
 		}
+
+		if (video)
+			video->dataConnected = FALSE;
 	}
 	free(pChannelCallback);
 	return CHANNEL_RC_OK;
@@ -1022,6 +1087,16 @@ static UINT video_control_on_new_channel_connection(IWTSListenerCallback* listen
 // NOLINTEND(readability-non-const-parameter)
 {
 	GENERIC_LISTENER_CALLBACK* listener_callback = (GENERIC_LISTENER_CALLBACK*)listenerCallback;
+	WINPR_ASSERT(listener_callback);
+
+	VIDEO_PLUGIN* video = (VIDEO_PLUGIN*)listener_callback->plugin;
+	WINPR_ASSERT(video);
+
+	if (video->connected)
+	{
+		WLog_ERR(TAG, "Channel already connected, terminating.");
+		return ERROR_DEVICE_ALREADY_ATTACHED;
+	}
 
 	GENERIC_CHANNEL_CALLBACK* callback =
 	    (GENERIC_CHANNEL_CALLBACK*)calloc(1, sizeof(GENERIC_CHANNEL_CALLBACK));
@@ -1039,6 +1114,7 @@ static UINT video_control_on_new_channel_connection(IWTSListenerCallback* listen
 	listener_callback->channel_callback = callback;
 
 	*ppCallback = &callback->iface;
+	video->connected = TRUE;
 
 	return CHANNEL_RC_OK;
 }
@@ -1053,6 +1129,16 @@ static UINT video_data_on_new_channel_connection(IWTSListenerCallback* pListener
 // NOLINTEND(readability-non-const-parameter)
 {
 	GENERIC_LISTENER_CALLBACK* listener_callback = (GENERIC_LISTENER_CALLBACK*)pListenerCallback;
+	WINPR_ASSERT(listener_callback);
+
+	VIDEO_PLUGIN* video = (VIDEO_PLUGIN*)listener_callback->plugin;
+	WINPR_ASSERT(video);
+
+	if (video->dataConnected)
+	{
+		WLog_ERR(TAG, "Channel already connected, terminating.");
+		return ERROR_DEVICE_ALREADY_ATTACHED;
+	}
 
 	GENERIC_CHANNEL_CALLBACK* callback =
 	    (GENERIC_CHANNEL_CALLBACK*)calloc(1, sizeof(GENERIC_CHANNEL_CALLBACK));
@@ -1070,6 +1156,7 @@ static UINT video_data_on_new_channel_connection(IWTSListenerCallback* pListener
 	listener_callback->channel_callback = callback;
 
 	*ppCallback = &callback->iface;
+	video->dataConnected = TRUE;
 
 	return CHANNEL_RC_OK;
 }

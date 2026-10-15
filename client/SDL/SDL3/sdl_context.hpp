@@ -37,6 +37,7 @@
 #include "sdl_disp.hpp"
 #include "sdl_clip.hpp"
 #include "sdl_input.hpp"
+#include "sdl_rail.hpp"
 
 #include "dialogs/sdl_connection_dialog_wrapper.hpp"
 
@@ -129,6 +130,7 @@ class SdlContext
 	[[nodiscard]] sdlDispContext& getDisplayChannelContext();
 	[[nodiscard]] sdlInput& getInputChannelContext();
 	[[nodiscard]] sdlClip& getClipboardChannelContext();
+	[[nodiscard]] SdlRail& getRailChannelContext();
 
 	[[nodiscard]] SdlConnectionDialogWrapper& getDialog();
 
@@ -165,6 +167,8 @@ class SdlContext
 	[[nodiscard]] static BOOL postConnect(freerdp* instance);
 	static void postDisconnect(freerdp* instance);
 	static void postFinalDisconnect(freerdp* instance);
+	[[nodiscard]] static BOOL getAccessToken(freerdp* instance, AccessTokenType tokenType,
+	                                         char** token, size_t count, ...);
 	[[nodiscard]] static BOOL desktopResize(rdpContext* context);
 	[[nodiscard]] static BOOL playSound(rdpContext* context, const PLAY_SOUND_UPDATE* play_sound);
 	[[nodiscard]] static BOOL beginPaint(rdpContext* context);
@@ -232,6 +236,7 @@ class SdlContext
 	sdlDispContext _disp;
 	sdlInput _input;
 	sdlClip _clip;
+	SdlRail _rail;
 
 	SdlConnectionDialogWrapper _dialog;
 

@@ -81,6 +81,10 @@
 #include <sys/sysctl.h>
 #endif
 
+#if defined(__OpenBSD__)
+#include <errno.h>
+#endif
+
 #endif
 
 DLL_DIRECTORY_COOKIE AddDllDirectory(WINPR_ATTR_UNUSED PCWSTR NewDirectory)
@@ -292,6 +296,54 @@ static DWORD module_from_proc(const char* proc, LPSTR lpFilename, DWORD nSize)
 }
 #endif
 
+#if defined(__FreeBSD__)
+WINPR_ATTR_NODISCARD
+static DWORD freebsd_get_module_file_name(char* lpFilename, uint32_t nSize)
+{
+	int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
+	size_t cb = nSize;
+
+	{
+		const int rc = sysctl(mib, ARRAYSIZE(mib), nullptr, &cb, nullptr, 0);
+		if (rc != 0)
+		{
+			SetLastError(ERROR_INTERNAL_ERROR);
+			return 0;
+		}
+	}
+
+	char* fullname = calloc(cb + 1, sizeof(char));
+	if (!fullname)
+	{
+		SetLastError(ERROR_INTERNAL_ERROR);
+		return 0;
+	}
+
+	{
+		size_t cb2 = cb;
+		const int rc = sysctl(mib, ARRAYSIZE(mib), fullname, &cb2, nullptr, 0);
+		if ((rc != 0) || (cb2 != cb))
+		{
+			SetLastError(ERROR_INTERNAL_ERROR);
+			free(fullname);
+			return 0;
+		}
+	}
+
+	if (nSize > 0)
+	{
+		strncpy(lpFilename, fullname, nSize - 1);
+		lpFilename[nSize - 1] = '\0';
+	}
+	free(fullname);
+
+	if (nSize < cb)
+		SetLastError(ERROR_INSUFFICIENT_BUFFER);
+
+	return (DWORD)MIN(nSize, cb);
+}
+#endif
+
 #if defined(__MACOSX__)
 WINPR_ATTR_NODISCARD
 static uint32_t get_required_size(void)
@@ -364,6 +416,65 @@ static DWORD mac_get_module_file_name(char* lpFilename, uint32_t nSize)
 }
 #endif
 
+#if defined(__OpenBSD__)
+WINPR_ATTR_NODISCARD
+static DWORD openbsd_get_module_file_name(char* lpFilename, uint32_t nSize)
+{
+#ifdef WITH_GETEXECPATH
+	size_t size = nSize + 1ull;
+	char* path = calloc(1, size);
+
+	if (path == nullptr)
+	{
+		SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+		return 0;
+	}
+
+	while (getexecpath(path, size) != 0)
+	{
+		if (errno != ERANGE)
+		{
+			free(path);
+			SetLastError(ERROR_INTERNAL_ERROR);
+			return 0;
+		}
+
+		size += PATH_MAX;
+
+		char* tmp = realloc(path, size);
+
+		if (tmp == nullptr)
+		{
+			free(path);
+			SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+			return 0;
+		}
+
+		path = tmp;
+	}
+
+	const size_t length = strnlen(path, size);
+
+	memset(lpFilename, 0, nSize);
+	memcpy(lpFilename, path, MIN(length, nSize));
+
+	free(path);
+
+	if (length >= nSize)
+	{
+		SetLastError(ERROR_INSUFFICIENT_BUFFER);
+		return nSize;
+	}
+
+	return WINPR_ASSERTING_INT_CAST(DWORD, length);
+#else
+	WLog_ERR(TAG, "is not implemented");
+	SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+	return 0;
+#endif
+}
+#endif
+
 DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize)
 {
 	if (hModule)
@@ -376,53 +487,15 @@ DWORD GetModuleFileNameA(HMODULE hModule, LPSTR lpFilename, DWORD nSize)
 #if defined(__linux__)
 	return module_from_proc("/proc/self/exe", lpFilename, nSize);
 #elif defined(__FreeBSD__)
-	int mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
-	size_t cb = nSize;
-
-	{
-		const int rc = sysctl(mib, ARRAYSIZE(mib), nullptr, &cb, nullptr, 0);
-		if (rc != 0)
-		{
-			SetLastError(ERROR_INTERNAL_ERROR);
-			return 0;
-		}
-	}
-
-	char* fullname = calloc(cb + 1, sizeof(char));
-	if (!fullname)
-	{
-		SetLastError(ERROR_INTERNAL_ERROR);
-		return 0;
-	}
-
-	{
-		size_t cb2 = cb;
-		const int rc = sysctl(mib, ARRAYSIZE(mib), fullname, &cb2, nullptr, 0);
-		if ((rc != 0) || (cb2 != cb))
-		{
-			SetLastError(ERROR_INTERNAL_ERROR);
-			free(fullname);
-			return 0;
-		}
-	}
-
-	if (nSize > 0)
-	{
-		strncpy(lpFilename, fullname, nSize - 1);
-		lpFilename[nSize - 1] = '\0';
-	}
-	free(fullname);
-
-	if (nSize < cb)
-		SetLastError(ERROR_INSUFFICIENT_BUFFER);
-
-	return (DWORD)MIN(nSize, cb);
+	return freebsd_get_module_file_name(lpFilename, nSize);
 #elif defined(__NetBSD__)
 	return module_from_proc("/proc/curproc/exe", lpFilename, nSize);
 #elif defined(__DragonFly__)
 	return module_from_proc("/proc/curproc/file", lpFilename, nSize);
 #elif defined(__MACOSX__)
 	return mac_get_module_file_name(lpFilename, nSize);
+#elif defined(__OpenBSD__)
+	return openbsd_get_module_file_name(lpFilename, nSize);
 #else
 	WLog_ERR(TAG, "is not implemented");
 	SetLastError(ERROR_CALL_NOT_IMPLEMENTED);

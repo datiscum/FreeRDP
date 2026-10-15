@@ -334,6 +334,7 @@ UINT rdpei_server_init(RdpeiServerContext* context)
 
 out_close:
 	(void)WTSVirtualChannelClose(priv->channelHandle);
+	priv->channelHandle = INVALID_HANDLE_VALUE;
 	return CHANNEL_RC_INITIALIZATION_ERROR;
 }
 
@@ -771,6 +772,7 @@ UINT rdpei_server_handle_messages(RdpeiServerContext* context)
 				WLog_ERR(TAG, "read_cs_ready_message failed with error %" PRIu32 "", error);
 				return error;
 			}
+			priv->automataState = STATE_WAITING_FRAME;
 			break;
 
 		case EVENTID_TOUCH:

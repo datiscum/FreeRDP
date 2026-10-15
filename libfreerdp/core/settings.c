@@ -33,6 +33,7 @@
 #include <winpr/sysinfo.h>
 #include <winpr/registry.h>
 #include <winpr/wtsapi.h>
+#include <winpr/input.h>
 
 #include <freerdp/version.h>
 #include <freerdp/settings.h>
@@ -476,8 +477,8 @@ static UINT32** alloc_array(size_t count)
 {
 	// NOLINTNEXTLINE(clang-analyzer-unix.MallocSizeof)
 	BYTE* array = calloc(count * sizeof(uintptr_t), count * sizeof(UINT32));
-	UINT32** dst = (UINT32**)array;
-	UINT32* val = (UINT32*)(array + count * sizeof(uintptr_t));
+	UINT32** dst = WINPR_PACKED_ALIGN_CAST(UINT32**, array);
+	UINT32* val = WINPR_PACKED_ALIGN_CAST(UINT32*, (array + count * sizeof(uintptr_t)));
 	for (size_t x = 0; x < count; x++)
 		dst[x] = &val[x];
 
@@ -972,7 +973,7 @@ rdpSettings* freerdp_settings_new(DWORD flags)
 	    !freerdp_settings_set_uint32(settings, FreeRDP_RdpVersion, RDP_VERSION_10_12) ||
 	    !freerdp_settings_set_uint32(settings, FreeRDP_ColorDepth, 32) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_AadSecurity, FALSE) ||
-	    !freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE) ||
+	    !freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, TRUE) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, TRUE) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE) ||
@@ -1103,31 +1104,16 @@ rdpSettings* freerdp_settings_new(DWORD flags)
 	    !freerdp_settings_set_bool(settings, FreeRDP_DrawAllowDynamicColorFidelity, TRUE) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_FrameMarkerCommandEnabled, TRUE) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_SurfaceFrameMarkerEnabled, TRUE) ||
-	    !freerdp_settings_set_bool(settings, FreeRDP_AllowCacheWaitingList, TRUE) ||
-	    !freerdp_settings_set_uint32(settings, FreeRDP_BitmapCacheV2NumCells, 5))
-		goto out_fail;
-	settings->BitmapCacheV2CellInfo =
-	    (BITMAP_CACHE_V2_CELL_INFO*)calloc(6, sizeof(BITMAP_CACHE_V2_CELL_INFO));
-
-	if (!settings->BitmapCacheV2CellInfo)
+	    !freerdp_settings_set_bool(settings, FreeRDP_AllowCacheWaitingList, TRUE))
 		goto out_fail;
 
-	{
-		BITMAP_CACHE_V2_CELL_INFO cache = WINPR_C_ARRAY_INIT;
-		cache.numEntries = 600;
-		if (!freerdp_settings_set_pointer_array(settings, FreeRDP_BitmapCacheV2CellInfo, 0,
-		                                        &cache) ||
-		    !freerdp_settings_set_pointer_array(settings, FreeRDP_BitmapCacheV2CellInfo, 1, &cache))
-			goto out_fail;
-		cache.numEntries = 2048;
-		if (!freerdp_settings_set_pointer_array(settings, FreeRDP_BitmapCacheV2CellInfo, 2,
-		                                        &cache) ||
-		    !freerdp_settings_set_pointer_array(settings, FreeRDP_BitmapCacheV2CellInfo, 4, &cache))
-			goto out_fail;
-		cache.numEntries = 4096;
-		if (!freerdp_settings_set_pointer_array(settings, FreeRDP_BitmapCacheV2CellInfo, 3, &cache))
-			goto out_fail;
-	}
+	const BITMAP_CACHE_V2_CELL_INFO CellInfo[5] = {
+		{ 600, FALSE }, { 600, FALSE }, { 65536, FALSE }, { 4096, FALSE }, { 2048, FALSE }
+	};
+	if (!freerdp_settings_set_pointer_len(settings, FreeRDP_BitmapCacheV2CellInfo, CellInfo,
+	                                      ARRAYSIZE(CellInfo)))
+		goto out_fail;
+
 	if (!freerdp_settings_set_bool(settings, FreeRDP_NoBitmapCompressionHeader, TRUE) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_RefreshRect, TRUE) ||
 	    !freerdp_settings_set_bool(settings, FreeRDP_SuppressOutput, TRUE) ||
@@ -1281,6 +1267,11 @@ rdpSettings* freerdp_settings_new(DWORD flags)
 	    !freerdp_settings_set_uint32(settings, FreeRDP_TcpKeepAliveInterval, 2) ||
 	    !freerdp_settings_set_uint32(settings, FreeRDP_TcpAckTimeout, 9000) ||
 	    !freerdp_settings_set_uint32(settings, FreeRDP_TcpConnectTimeout, 15000))
+		goto out_fail;
+
+	/* Bound for waiting on a gateway HTTP response (status/header phase and body phase each),
+	 * separate from FreeRDP_TcpConnectTimeout, which only bounds TCP connection establishment. */
+	if (!freerdp_settings_set_uint32(settings, FreeRDP_GatewayResponseTimeout, 15000))
 		goto out_fail;
 
 	if (!freerdp_settings_get_bool(settings, FreeRDP_ServerMode))
@@ -1658,13 +1649,6 @@ out_fail:
 #pragma warning(pop)
 #endif
 
-static void zfree(WCHAR* str, size_t len)
-{
-	if (str)
-		memset(str, 0, len * sizeof(WCHAR));
-	free(str);
-}
-
 BOOL identity_set_from_settings_with_pwd(SEC_WINNT_AUTH_IDENTITY* identity,
                                          const rdpSettings* settings,
                                          FreeRDP_Settings_Keys_String UserId,
@@ -1682,8 +1666,8 @@ BOOL identity_set_from_settings_with_pwd(SEC_WINNT_AUTH_IDENTITY* identity,
 
 	const int rc = sspi_SetAuthIdentityWithLengthW(identity, Username, UserLen, Domain, DomainLen,
 	                                               Password, pwdLen);
-	zfree(Username, UserLen);
-	zfree(Domain, DomainLen);
+	winpr_znfree(Username, UserLen * sizeof(WCHAR));
+	winpr_znfree(Domain, DomainLen * sizeof(WCHAR));
 	return (rc >= 0);
 }
 
@@ -1701,7 +1685,7 @@ BOOL identity_set_from_settings(SEC_WINNT_AUTH_IDENTITY_W* identity, const rdpSe
 
 	const BOOL rc =
 	    identity_set_from_settings_with_pwd(identity, settings, UserId, DomainId, Password, PwdLen);
-	zfree(Password, PwdLen);
+	winpr_znfree(Password, PwdLen * sizeof(WCHAR));
 	return rc;
 }
 
@@ -1730,7 +1714,7 @@ BOOL identity_set_from_smartcard_hash(SEC_WINNT_AUTH_IDENTITY_W* identity,
 	const int rc = sspi_SetAuthIdentityWithLengthW(identity, marshalledCredentials,
 	                                               _wcslen(marshalledCredentials), nullptr, 0,
 	                                               Password, pwdLen);
-	zfree(Password, pwdLen);
+	winpr_znfree(Password, pwdLen * sizeof(WCHAR));
 	CredFree(marshalledCredentials);
 	return (rc >= 0);
 #else
@@ -1817,6 +1801,34 @@ BOOL freerdp_settings_enforce_monitor_exists(rdpSettings* settings)
 	}
 
 	return TRUE;
+}
+
+void freerdp_settings_sanitize_keyboard_type(wLog* log, rdpSettings* settings, const char* source)
+{
+	WINPR_ASSERT(settings);
+
+	switch (settings->KeyboardType)
+	{
+		case WINPR_KBD_TYPE_IBM_PC_XT:
+		case WINPR_KBD_TYPE_OLIVETTI_ICO:
+		case WINPR_KBD_TYPE_IBM_PC_AT:
+		case WINPR_KBD_TYPE_IBM_ENHANCED:
+		case WINPR_KBD_TYPE_NOKIA_1050:
+		case WINPR_KBD_TYPE_NOKIA_9140:
+		case WINPR_KBD_TYPE_JAPANESE:
+		case WINPR_KBD_TYPE_KOREAN:
+			return;
+		default:
+			break;
+	}
+
+	if (!log)
+		log = WLog_Get(TAG);
+	WLog_Print(log, WLOG_WARN,
+	           "%s: KeyboardType=0x%08" PRIx32
+	           " is not a known WINPR_KBD_TYPE, using WINPR_KBD_TYPE_IBM_ENHANCED instead",
+	           source ? source : "settings", settings->KeyboardType);
+	settings->KeyboardType = WINPR_KBD_TYPE_IBM_ENHANCED;
 }
 
 BOOL freerdp_settings_enforce_consistency(rdpSettings* settings)

@@ -147,14 +147,12 @@ static BOOL printer_write_setting(const char* path, prn_conf_t type, const void*
 
 	if (length > 0)
 	{
-		base64 = crypto_base64_encode(data, length);
+		size_t b64len = 0;
+		base64 = crypto_base64_encode_len(data, length, &b64len);
 
 		if (!base64)
 			goto fail;
 
-		/* base64 char represents 6bit -> 4*(n/3) is the length which is
-		 * always smaller than 2*n */
-		const size_t b64len = strnlen(base64, 2 * length);
 		rc = WriteFile(file, base64, (UINT32)b64len, &written, nullptr);
 
 		if (b64len != written)
@@ -414,7 +412,7 @@ static BOOL printer_load_from_config(const rdpSettings* settings, rdpPrinter* pr
 	backslash.c[0] = '\\';
 	backslash.c[1] = '\0';
 
-	for (WCHAR* wptr = wname; (wptr = _wcschr(wptr, backslash.w));)
+	for (WCHAR* wptr = wname; (wptr = winpr_wcsnchr(wptr, wlen, backslash.w));)
 		*wptr = L'_';
 	Stream_Write(printer_dev->device.data, wname, PrinterNameLen);
 

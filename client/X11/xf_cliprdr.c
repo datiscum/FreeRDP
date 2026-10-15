@@ -144,6 +144,7 @@ struct xf_clipboard
 };
 
 static const char mime_text_plain[] = "text/plain";
+static const char mime_text_utf8[] = "text/plain;charset=utf-8";
 static const char mime_uri_list[] = "text/uri-list";
 static const char mime_html[] = "text/html";
 static const char* mime_bitmap[] = { "image/bmp", "image/x-bmp", "image/x-MS-bmp",
@@ -388,7 +389,7 @@ static BOOL xf_cliprdr_is_atom_available(xfClipboard* clipboard, Atom atom)
 	WINPR_ASSERT(clipboard);
 
 	char* name = Safe_XGetAtomName(clipboard->log, clipboard->xfc->display, atom);
-	for (size_t x = 0; x < clipboard->numClientFormats; x++)
+	for (size_t x = 0; x < clipboard->clientAvailableFormatAtomsCount; x++)
 	{
 		WINPR_ASSERT(clipboard->clientAvailableFormatAtoms);
 
@@ -419,7 +420,7 @@ static const xfCliprdrFormat* xf_cliprdr_get_client_available_format_by_id(xfCli
 	{
 		const xfCliprdrFormat* format = &(clipboard->clientFormats[index]);
 
-		if (!xf_cliprdr_is_atom_available(clipboard, format->atom))
+		if (!xf_cliprdr_is_atom_available(clipboard, format->atom) && (formatId != CF_RAW))
 			continue;
 
 		if (fetchImage && format->isImage)
@@ -566,7 +567,7 @@ static wStream* xf_cliprdr_serialize_server_format_list(xfClipboard* clipboard)
 
 		DEBUG_CLIPRDR("server announced 0x%08" PRIx32 " [%s][%s]", format->formatId,
 		              ClipboardGetFormatIdString(format->formatId), format->formatName);
-		if (!Stream_EnsureRemainingCapacity(s, sizeof(UINT32) + name_length + 1))
+		if (!Stream_EnsureRemainingCapacity(s, sizeof(UINT32) + name_length + 1ull))
 		{
 			WLog_Print(clipboard->log, WLOG_ERROR, "failed to expand serialized format list");
 			goto error;
@@ -782,7 +783,7 @@ static CLIPRDR_FORMAT* xf_cliprdr_get_formats_from_targets(xfClipboard* clipboar
 		const uint32_t htmlFormatId = ClipboardRegisterFormat(clipboard->system, type_HtmlFormat);
 		for (unsigned long i = 0; i < proplength; i++)
 		{
-			Atom tatom = ((Atom*)data)[i];
+			Atom tatom = WINPR_PACKED_ALIGN_CAST(Atom*, data)[i];
 			const xfCliprdrFormat* format = xf_cliprdr_get_client_format_by_atom(clipboard, tatom);
 
 			if (xf_cliprdr_should_add_format(formats, *numFormats, format))
@@ -833,7 +834,7 @@ out:
 		XFree(data);
 	else if (atoms && data)
 	{
-		*atoms = (Atom*)data;
+		*atoms = WINPR_PACKED_ALIGN_CAST(Atom*, data);
 		*atomsCount = proplength;
 	}
 
@@ -1074,7 +1075,7 @@ static void xf_cliprdr_process_requested_data(xfClipboard* clipboard, BOOL hasDa
 	     ClipboardGetFormatId(clipboard->system, type_FileGroupDescriptorW)))
 	{
 		UINT error = NO_ERROR;
-		FILEDESCRIPTORW* file_array = (FILEDESCRIPTORW*)pDstData;
+		FILEDESCRIPTORW* file_array = WINPR_PACKED_ALIGN_CAST(FILEDESCRIPTORW*, pDstData);
 		UINT32 file_count = DstSize / sizeof(FILEDESCRIPTORW);
 		pDstData = nullptr;
 		DstSize = 0;
@@ -2053,12 +2054,13 @@ static UINT xf_cliprdr_server_capabilities(CliprdrClientContext* context,
 
 	for (UINT32 i = 0; i < capabilities->cCapabilitiesSets; i++)
 	{
-		const CLIPRDR_CAPABILITY_SET* caps = (const CLIPRDR_CAPABILITY_SET*)capsPtr;
+		const CLIPRDR_CAPABILITY_SET* caps =
+		    WINPR_PACKED_ALIGN_CAST(const CLIPRDR_CAPABILITY_SET*, capsPtr);
 
 		if (caps->capabilitySetType == CB_CAPSTYPE_GENERAL)
 		{
 			const CLIPRDR_GENERAL_CAPABILITY_SET* generalCaps =
-			    (const CLIPRDR_GENERAL_CAPABILITY_SET*)caps;
+			    WINPR_PACKED_ALIGN_CAST(const CLIPRDR_GENERAL_CAPABILITY_SET*, caps);
 
 			if (!cliprdr_file_context_remote_set_flags(clipboard->file, generalCaps->generalFlags))
 				return ERROR_INTERNAL_ERROR;
@@ -2721,7 +2723,7 @@ xfClipboard* xf_clipboard_new(xfContext* xfc, BOOL relieveFilenameRestriction)
 	clientFormat = &clipboard->clientFormats[n++];
 	clientFormat->atom = Logging_XInternAtom(clipboard->log, xfc->display, "UTF8_STRING", False);
 	clientFormat->formatToRequest = CF_UNICODETEXT;
-	clientFormat->localFormat = ClipboardGetFormatId(xfc->clipboard->system, mime_text_plain);
+	clientFormat->localFormat = ClipboardGetFormatId(xfc->clipboard->system, mime_text_utf8);
 
 	clientFormat = &clipboard->clientFormats[n++];
 	clientFormat->atom = XA_STRING;

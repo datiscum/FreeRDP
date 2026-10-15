@@ -272,7 +272,7 @@ BYTE* freerdp_glyph_convert_ex(UINT32 width, UINT32 height, const BYTE* WINPR_RE
 
 	WINPR_ASSERT(data);
 
-	BYTE* dstData = (BYTE*)winpr_aligned_malloc(1ull * width * height, 16);
+	BYTE* dstData = (BYTE*)winpr_aligned_calloc(width, height, 16);
 
 	if (!dstData)
 		return nullptr;
@@ -477,8 +477,8 @@ BOOL freerdp_image_copy_from_icon_data(BYTE* WINPR_RESTRICT pDstData, UINT32 Dst
 	                                   bitsColor, format, 0, 0, 0, &palette, FREERDP_FLIP_VERTICAL))
 		return FALSE;
 
-	/* apply alpha mask */
-	if (FreeRDPColorHasAlpha(DstFormat) && (cbBitsMask > 0))
+	/* apply alpha mask, skip if we already got alpha in the bitmap */
+	if (FreeRDPColorHasAlpha(DstFormat) && !FreeRDPColorHasAlpha(format) && (cbBitsMask > 0))
 	{
 		BYTE* dstBuf = pDstData;
 		UINT32 dstBpp = FreeRDPGetBytesPerPixel(DstFormat);

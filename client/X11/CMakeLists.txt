@@ -61,6 +61,8 @@ set(SRCS
     xf_channels.h
     xf_cliprdr.c
     xf_cliprdr.h
+    xf_reconnect.c
+    xf_reconnect.h
     xf_monitor.c
     xf_monitor.h
     xf_disp.c
@@ -206,6 +208,10 @@ target_link_libraries(${PROJECT_NAME} PRIVATE ${PRIV_LIBS})
 if(WITH_CLIENT_INTERFACE)
   installwithrpath(TARGETS ${PROJECT_NAME} DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT libraries)
 endif()
+if(BUILD_TESTING)
+  add_subdirectory(test)
+endif()
+
 add_subdirectory(cli)
 add_subdirectory(man)
 

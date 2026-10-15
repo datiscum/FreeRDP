@@ -415,22 +415,45 @@ static state_run_t license_server_recv(rdpLicense* license, wStream* s);
 
 #ifdef WITH_DEBUG_LICENSE
 
-static const char* error_codes[] = { "ERR_UNKNOWN",
-	                                 "ERR_INVALID_SERVER_CERTIFICATE",
-	                                 "ERR_NO_LICENSE",
-	                                 "ERR_INVALID_MAC",
-	                                 "ERR_INVALID_SCOPE",
-	                                 "ERR_UNKNOWN",
-	                                 "ERR_NO_LICENSE_SERVER",
-	                                 "STATUS_VALID_CLIENT",
-	                                 "ERR_INVALID_CLIENT",
-	                                 "ERR_UNKNOWN",
-	                                 "ERR_UNKNOWN",
-	                                 "ERR_INVALID_PRODUCT_ID",
-	                                 "ERR_INVALID_MESSAGE_LENGTH" };
+WINPR_ATTR_NODISCARD
+static const char* error_codes(UINT32 idx)
+{
+#define EVCASE(x) \
+	case x:       \
+		return #x
+	switch (idx)
+	{
+		EVCASE(ERR_INVALID_SERVER_CERTIFICATE);
+		EVCASE(ERR_NO_LICENSE);
+		EVCASE(ERR_INVALID_MAC);
+		EVCASE(ERR_INVALID_SCOPE);
+		EVCASE(ERR_NO_LICENSE_SERVER);
+		EVCASE(STATUS_VALID_CLIENT);
+		EVCASE(ERR_INVALID_CLIENT);
+		EVCASE(ERR_INVALID_PRODUCT_ID);
+		EVCASE(ERR_INVALID_MESSAGE_LENGTH);
+		default:
+			return "ERR_UNKNOWN";
+	}
+}
 
-static const char* state_transitions[] = { "ST_UNKNOWN", "ST_TOTAL_ABORT", "ST_NO_TRANSITION",
-	                                       "ST_RESET_PHASE_TO_START", "ST_RESEND_LAST_MESSAGE" };
+WINPR_ATTR_NODISCARD
+static const char* state_transitions(UINT32 idx)
+{
+#define EVCASE(x) \
+	case x:       \
+		return #x
+
+	switch (idx)
+	{
+		EVCASE(ST_TOTAL_ABORT);
+		EVCASE(ST_NO_TRANSITION);
+		EVCASE(ST_RESET_PHASE_TO_START);
+		EVCASE(ST_RESEND_LAST_MESSAGE);
+		default:
+			return "ST_UNKNOWN";
+	}
+}
 
 static void license_print_product_info(wLog* log, const LICENSE_PRODUCT_INFO* productInfo)
 {
@@ -441,10 +464,12 @@ static void license_print_product_info(wLog* log, const LICENSE_PRODUCT_INFO* pr
 	WINPR_ASSERT(productInfo->pbCompanyName);
 	WINPR_ASSERT(productInfo->pbProductId);
 
-	CompanyName = ConvertWCharNToUtf8Alloc((const WCHAR*)productInfo->pbCompanyName,
-	                                       productInfo->cbCompanyName / sizeof(WCHAR), nullptr);
-	ProductId = ConvertWCharNToUtf8Alloc((const WCHAR*)productInfo->pbProductId,
-	                                     productInfo->cbProductId / sizeof(WCHAR), nullptr);
+	CompanyName =
+	    ConvertWCharNToUtf8Alloc(WINPR_PACKED_ALIGN_CAST(const WCHAR*, productInfo->pbCompanyName),
+	                             productInfo->cbCompanyName / sizeof(WCHAR), nullptr);
+	ProductId =
+	    ConvertWCharNToUtf8Alloc(WINPR_PACKED_ALIGN_CAST(const WCHAR*, productInfo->pbProductId),
+	                             productInfo->cbProductId / sizeof(WCHAR), nullptr);
 	WLog_Print(log, WLOG_INFO, "ProductInfo:");
 	WLog_Print(log, WLOG_INFO, "\tdwVersion: 0x%08" PRIX32 "", productInfo->dwVersion);
 	WLog_Print(log, WLOG_INFO, "\tCompanyName: %s", CompanyName);
@@ -461,13 +486,11 @@ static void license_print_scope_list(wLog* log, const SCOPE_LIST* scopeList)
 
 	for (UINT32 index = 0; index < scopeList->count; index++)
 	{
-		const LICENSE_BLOB* scope = nullptr;
-
 		WINPR_ASSERT(scopeList->array);
-		scope = scopeList->array[index];
+		const LICENSE_BLOB* scope = scopeList->array[index];
 		WINPR_ASSERT(scope);
 
-		WLog_Print(log, WLOG_INFO, "\t%s", (const char*)scope->data);
+		WLog_Print(log, WLOG_INFO, "\t%.*s", (int)scope->length, (const char*)scope->data);
 	}
 }
 #endif
@@ -508,20 +531,15 @@ state_run_t license_recv(rdpLicense* license, wStream* s)
 }
 
 WINPR_ATTR_NODISCARD
-static BOOL license_check_stream_length(wLog* log, wStream* s, SSIZE_T expect, const char* where)
+static BOOL license_check_stream_length(wLog* log, wStream* s, UINT64 expect, const char* where)
 {
 	const size_t remain = Stream_GetRemainingLength(s);
 
 	WINPR_ASSERT(where);
 
-	if (expect < 0)
+	if (remain < expect)
 	{
-		WLog_Print(log, WLOG_WARN, "invalid %s, expected value %" PRIdz " invalid", where, expect);
-		return FALSE;
-	}
-	if (remain < (size_t)expect)
-	{
-		WLog_Print(log, WLOG_WARN, "short %s, expected %" PRIdz " bytes, got %" PRIuz, where,
+		WLog_Print(log, WLOG_WARN, "short %s, expected %" PRIu64 " bytes, got %" PRIuz, where,
 		           expect, remain);
 		return FALSE;
 	}
@@ -760,7 +778,14 @@ static BOOL license_read_preamble(wLog* log, wStream* s, BYTE* bMsgType, BYTE* f
 	Stream_Read_UINT8(s, *bMsgType);  /* bMsgType (1 byte) */
 	Stream_Read_UINT8(s, *flags);     /* flags (1 byte) */
 	Stream_Read_UINT16(s, *wMsgSize); /* wMsgSize (2 bytes) */
-	return license_check_stream_length(log, s, *wMsgSize - 4ll, "license preamble::wMsgSize");
+	if (*wMsgSize < 4)
+	{
+		WLog_Print(log, WLOG_WARN,
+		           "invalid license preamble::wMsgSize, expected value >= 4, got %" PRIu32,
+		           *wMsgSize);
+		return FALSE;
+	}
+	return license_check_stream_length(log, s, *wMsgSize - 4ull, "license preamble::wMsgSize");
 }
 
 /**
@@ -1635,7 +1660,7 @@ BOOL license_write_binary_blob(wStream* s, const LICENSE_BLOB* blob)
 {
 	WINPR_ASSERT(blob);
 
-	if (!Stream_EnsureRemainingCapacity(s, blob->length + 4))
+	if (!Stream_EnsureRemainingCapacity(s, blob->length + 4ull))
 		return FALSE;
 
 	Stream_Write_UINT16(s, blob->type);   /* wBlobType (2 bytes) */
@@ -1662,7 +1687,7 @@ static BOOL license_write_encrypted_premaster_secret_blob(wLog* log, wStream* s,
 		return FALSE;
 	}
 
-	if (!Stream_EnsureRemainingCapacity(s, length + 4))
+	if (!Stream_EnsureRemainingCapacity(s, length + 4ull))
 		return FALSE;
 	Stream_Write_UINT16(s, blob->type);     /* wBlobType (2 bytes) */
 	Stream_Write_UINT16(s, (UINT16)length); /* wBlobLen (2 bytes) */
@@ -1732,7 +1757,7 @@ BOOL license_read_scope_list(wLog* log, wStream* s, SCOPE_LIST* scopeList)
 
 	Stream_Read_UINT32(s, scopeCount); /* ScopeCount (4 bytes) */
 
-	if (!license_check_stream_length(log, s, 4ll * scopeCount, "license scope list::count"))
+	if (!license_check_stream_length(log, s, 4ull * scopeCount, "license scope list::count"))
 		return FALSE;
 
 	if (!license_scope_list_resize(scopeList, scopeCount))
@@ -2393,7 +2418,7 @@ BOOL license_read_error_alert_packet(rdpLicense* license, wStream* s)
 
 #ifdef WITH_DEBUG_LICENSE
 	WLog_Print(license->log, WLOG_DEBUG, "dwErrorCode: %s, dwStateTransition: %s",
-	           error_codes[dwErrorCode], state_transitions[dwStateTransition]);
+	           error_codes(dwErrorCode), state_transitions(dwStateTransition));
 #endif
 
 	if (dwErrorCode == STATUS_VALID_CLIENT)

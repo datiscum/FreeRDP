@@ -33,6 +33,10 @@
 
 #include "utils.h"
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 #include "../core/rdp.h"
 
 BOOL utils_str_copy(const char* value, char** dst)
@@ -48,6 +52,7 @@ BOOL utils_str_copy(const char* value, char** dst)
 	return (*dst) != nullptr;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL utils_copy_smartcard_settings(const rdpSettings* settings, rdpSettings* origSettings)
 {
 	/* update original settings with provided smart card settings */
@@ -63,6 +68,7 @@ static BOOL utils_copy_smartcard_settings(const rdpSettings* settings, rdpSettin
 	return TRUE;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL utils_auth_skip(freerdp* instance, rdp_auth_reason reason, BOOL gateway)
 {
 	WINPR_ASSERT(instance);
@@ -391,6 +397,7 @@ const char* utils_is_vsock(const char* hostname)
 	return nullptr;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL remove_rdpdr_type(rdpSettings* settings, UINT32 type)
 {
 	BOOL rc = TRUE;
@@ -408,6 +415,7 @@ static BOOL remove_rdpdr_type(rdpSettings* settings, UINT32 type)
 	return rc;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL disable_clipboard(rdpSettings* settings)
 {
 	if (!freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, FALSE))
@@ -416,6 +424,7 @@ static BOOL disable_clipboard(rdpSettings* settings)
 	return TRUE;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL disable_drive(rdpSettings* settings)
 {
 	if (!freerdp_settings_set_bool(settings, FreeRDP_RedirectDrives, FALSE))
@@ -426,6 +435,7 @@ static BOOL disable_drive(rdpSettings* settings)
 	return remove_rdpdr_type(settings, RDPDR_DTYP_FILESYSTEM);
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL disable_printers(rdpSettings* settings)
 {
 	if (!freerdp_settings_set_bool(settings, FreeRDP_RedirectPrinters, FALSE))
@@ -434,6 +444,7 @@ static BOOL disable_printers(rdpSettings* settings)
 	return remove_rdpdr_type(settings, RDPDR_DTYP_PRINT);
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL disable_port(rdpSettings* settings)
 {
 	if (!freerdp_settings_set_bool(settings, FreeRDP_RedirectParallelPorts, FALSE))
@@ -445,12 +456,14 @@ static BOOL disable_port(rdpSettings* settings)
 	return remove_rdpdr_type(settings, RDPDR_DTYP_PARALLEL);
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL disable_pnp(WINPR_ATTR_UNUSED rdpSettings* settings)
 {
 	// TODO(akallabeth): [MS-RDPEPNP] related stuff is disabled.
 	return TRUE;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL apply_gw_policy(rdpContext* context)
 {
 	WINPR_ASSERT(context);
@@ -598,6 +611,7 @@ const char* guid2str(const GUID* guid, char* buffer, size_t len)
 	return buffer;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL isValidIPv4(const char* ipAddress)
 {
 	struct sockaddr_in sa = WINPR_C_ARRAY_INIT;
@@ -605,6 +619,7 @@ static BOOL isValidIPv4(const char* ipAddress)
 	return result != 0;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL isValidIPv6(const char* ipAddress)
 {
 	struct sockaddr_in6 sa = WINPR_C_ARRAY_INIT;
@@ -615,4 +630,47 @@ static BOOL isValidIPv6(const char* ipAddress)
 BOOL utils_is_valid_ip(const char* ipAddress)
 {
 	return isValidIPv4(ipAddress) || isValidIPv6(ipAddress);
+}
+
+BOOL utils_set_umask(void)
+{
+#if !defined(_WIN32)
+	(void)umask(S_IRWXG | S_IRWXO);
+#endif
+	return TRUE;
+}
+
+BOOL utils_compare_ip_strings(const char* ipAddressA, size_t lenA, const char* ipAddressB,
+                              size_t lenB)
+{
+	if (!ipAddressA || (lenA == 0))
+		return FALSE;
+	if (!ipAddressB || (lenB == 0))
+		return FALSE;
+	if (strnlen(ipAddressA, lenA + 1) > lenA)
+		return FALSE;
+	if (strnlen(ipAddressB, lenB + 1) > lenB)
+		return FALSE;
+
+	if (isValidIPv4(ipAddressA) && isValidIPv4(ipAddressB))
+	{
+		struct sockaddr_in sa = WINPR_C_ARRAY_INIT;
+		struct sockaddr_in sb = WINPR_C_ARRAY_INIT;
+		const int resultA = inet_pton(AF_INET, ipAddressA, &(sa.sin_addr));
+		const int resultB = inet_pton(AF_INET, ipAddressB, &(sb.sin_addr));
+		if ((resultA != resultB) || (resultA != 0))
+			return FALSE;
+		return memcmp(&sa, &sb, sizeof(sa)) == 0;
+	}
+	if (isValidIPv6(ipAddressA) && isValidIPv6(ipAddressB))
+	{
+		struct sockaddr_in6 sa = WINPR_C_ARRAY_INIT;
+		struct sockaddr_in6 sb = WINPR_C_ARRAY_INIT;
+		const int resultA = inet_pton(AF_INET6, ipAddressA, &(sa.sin6_addr));
+		const int resultB = inet_pton(AF_INET6, ipAddressB, &(sb.sin6_addr));
+		if ((resultA != resultB) || (resultA != 0))
+			return FALSE;
+		return memcmp(&sa, &sb, sizeof(sa)) == 0;
+	}
+	return FALSE;
 }

@@ -53,7 +53,7 @@ UINT32 audio_format_compute_time_length(const AUDIO_FORMAT* format, size_t size)
 
 			if ((format->cbSize == 2) && (format->data))
 			{
-				nSamplesPerBlock = *((UINT16*)format->data);
+				nSamplesPerBlock = *(WINPR_PACKED_ALIGN_CAST(UINT16*, format->data));
 				const size_t samples = (size / format->nBlockAlign) * nSamplesPerBlock;
 				WINPR_ASSERT(samples <= UINT32_MAX);
 				wSamples = (UINT32)samples;
@@ -184,7 +184,7 @@ BOOL audio_format_write(wStream* s, const AUDIO_FORMAT* format)
 	if (!s || !format)
 		return FALSE;
 
-	if (!Stream_EnsureRemainingCapacity(s, 18 + format->cbSize))
+	if (!Stream_EnsureRemainingCapacity(s, 18ull + format->cbSize))
 		return FALSE;
 
 	Stream_Write_UINT16(s, format->wFormatTag);      /* wFormatTag (WAVE_FORMAT_PCM) */

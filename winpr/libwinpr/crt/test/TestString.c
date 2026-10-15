@@ -199,9 +199,15 @@ static BOOL test_valid_url(void)
 
 #if defined(WINPR_HAVE_REGCOMP) || defined(WITH_URIPARSER)
 		if (rc1 != rc2)
+		{
+			(void)fprintf(stderr, "[%.*s] %s is not valid\n", __func__, cur->len, cur->string);
 			rc = FALSE;
-		if (rc1 != cur->isUrl)
+		}
+		else if (rc1 != cur->isUrl)
+		{
+			(void)fprintf(stderr, "[%.*s] %s is not valid\n", __func__, cur->len, cur->string);
 			rc = FALSE;
+		}
 #else
 		fprintf(stderr, "[%s] TODO: !defined(WINPR_HAVE_REGCOMP) && !defined(WITH_URIPARSER)\n",
 		        __func__);
@@ -236,6 +242,55 @@ static BOOL test_newline(void)
 	return TRUE;
 }
 
+static BOOL test_crlf(void)
+{
+	struct test_t
+	{
+		const char* string;
+		size_t len;
+		const char* expected;
+		size_t expectedLen;
+	};
+
+	/* input lengths exclude the terminator, like text/plain from the X11 and
+	 * SDL clients; the last case includes it */
+	const struct test_t tests[] = {
+		{ "\nabc", 4, "\r\nabc", 5 }, { "abc\n", 4, "abc\r\n", 5 },
+		{ "\n", 1, "\r\n", 2 },       { "\r", 1, "\r\n", 2 },
+		{ "a\r\nb", 4, "a\r\nb", 4 }, { "a\n\nb", 4, "a\r\n\r\nb", 6 },
+		{ "\r\n", 2, "\r\n", 2 },     { "a\nb", 4, "a\r\nb", 5 },
+	};
+
+	BOOL rc = TRUE;
+	for (size_t x = 0; x < ARRAYSIZE(tests); x++)
+	{
+		const struct test_t* cur = &tests[x];
+
+		size_t size = cur->len;
+		char* cnv = ConvertLineEndingToCRLF(cur->string, &size);
+		if (!cnv || (size != cur->expectedLen) || (memcmp(cnv, cur->expected, size) != 0) ||
+		    (cnv[size] != '\0'))
+		{
+			printf("ConvertLineEndingToCRLF error: case %" PRIuz ": size %" PRIuz
+			       ", expected %" PRIuz "\n",
+			       x, size, cur->expectedLen);
+			rc = FALSE;
+		}
+		free(cnv);
+	}
+
+	size_t size = 0;
+	char* cnv = ConvertLineEndingToCRLF("", &size);
+	if (cnv || (size != 0))
+	{
+		printf("ConvertLineEndingToCRLF error: empty input returned data\n");
+		rc = FALSE;
+	}
+	free(cnv);
+
+	return rc;
+}
+
 int TestString(int argc, char* argv[])
 {
 	const WCHAR* p = nullptr;
@@ -261,6 +316,9 @@ int TestString(int argc, char* argv[])
 	if (!test_winpr_strnstr())
 		return -1;
 
+	if (!test_crlf())
+		return -1;
+
 	/* _wcslen */
 	WCHAR testStringW[ARRAYSIZE(testStringA)] = WINPR_C_ARRAY_INIT;
 	(void)ConvertUtf8NToWChar(testStringA, ARRAYSIZE(testStringA), testStringW,
@@ -284,6 +342,7 @@ int TestString(int argc, char* argv[])
 	search.c[0] = 'r';
 	search.c[1] = '\0';
 
+#if !defined(WITHOUT_WINPR_3x_DEPRECATED)
 	p = _wcschr(testStringW, search.w);
 	pos = (p - testStringW);
 
@@ -310,6 +369,7 @@ int TestString(int argc, char* argv[])
 		       (const void*)p);
 		return -1;
 	}
+#endif
 
 	/* wcstok_s */
 	WCHAR testDelimiterW[ARRAYSIZE(testDelimiterA)] = WINPR_C_ARRAY_INIT;
@@ -359,5 +419,17 @@ int TestString(int argc, char* argv[])
 		return -1;
 	}
 
+	{
+		char test[] = "foo\r\nbar\r\nhaha\r\n";
+		const size_t slen = strnlen(test, sizeof(test));
+
+		const size_t rc = ConvertLineEndingToLF(test, sizeof(test));
+		if (rc != sizeof(test) - 3)
+			return -1;
+
+		const size_t rlen = strnlen(test, sizeof(test));
+		if (rlen != slen - 3)
+			return -1;
+	}
 	return 0;
 }

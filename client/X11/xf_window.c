@@ -407,7 +407,7 @@ void xf_SetWindowFullscreen(xfContext* xfc, xfWindow* window, BOOL fullscreen)
 				if (xf_GetWindowProperty(xfc, window->handle, xfc->NET_WM_STATE, 255, &nitems,
 				                         &bytes, &prop))
 				{
-					const Atom* aprop = (const Atom*)prop;
+					const Atom* aprop = WINPR_PACKED_ALIGN_CAST(const Atom*, prop);
 					state = 0;
 
 					for (size_t x = 0; x < nitems; x++)
@@ -519,7 +519,7 @@ static BOOL xf_GetNumberOfDesktops(xfContext* xfc, Window root, unsigned* pval)
 	const BOOL rc =
 	    xf_GetWindowProperty(xfc, root, xfc->NET_NUMBER_OF_DESKTOPS, 1, &nitems, &bytes, &bprop);
 
-	long* prop = (long*)bprop;
+	long* prop = WINPR_PACKED_ALIGN_CAST(long*, bprop);
 	*pval = 0;
 
 	BOOL res = FALSE;
@@ -551,7 +551,7 @@ static BOOL xf_GetCurrentDesktop(xfContext* xfc, Window root)
 	const BOOL rc =
 	    xf_GetWindowProperty(xfc, root, xfc->NET_CURRENT_DESKTOP, 1, &nitems, &bytes, &bprop);
 
-	long* prop = (long*)bprop;
+	long* prop = WINPR_PACKED_ALIGN_CAST(long*, bprop);
 	xfc->current_desktop = 0;
 	if (rc)
 		xfc->current_desktop = (int)MIN(max - 1, *prop);
@@ -569,7 +569,7 @@ static BOOL xf_GetWorkArea_NET_WORKAREA(xfContext* xfc, Window root)
 
 	const BOOL status =
 	    xf_GetWindowProperty(xfc, root, xfc->NET_WORKAREA, INT_MAX, &nitems, &bytes, &bprop);
-	long* prop = (long*)bprop;
+	long* prop = WINPR_PACKED_ALIGN_CAST(long*, bprop);
 
 	if (!status)
 		goto fail;
@@ -996,13 +996,27 @@ static void xf_FixWindowCoordinates(xfContext* xfc, int* x, int* y, int* width, 
 
 	if (*x < xfc->vscreen.area.left)
 	{
-		*width += *x;
+		/* Only trim the window when a usable width is left. The original code
+		 * unconditionally did `*width += *x`, which turns the width negative
+		 * (and later clamps it to 1px) when the server reports an x far left of
+		 * the virtual desktop - which happens for RemoteApp dialogs when the
+		 * window manager places them. */
+		const int shift = xfc->vscreen.area.left - *x;
+
+		if (*width - shift >= 64)
+			*width -= shift;
+
 		*x = xfc->vscreen.area.left;
 	}
 
 	if (*y < xfc->vscreen.area.top)
 	{
-		*height += *y;
+		/* See above. */
+		const int shift = xfc->vscreen.area.top - *y;
+
+		if (*height - shift >= 64)
+			*height -= shift;
+
 		*y = xfc->vscreen.area.top;
 	}
 
@@ -1061,7 +1075,7 @@ BOOL xf_AppWindowCreate(xfContext* xfc, xfAppWindow* appWindow)
 	xf_FixWindowCoordinates(xfc, &appWindow->x, &appWindow->y, &appWindow->width,
 	                        &appWindow->height);
 	appWindow->shmid = -1;
-	appWindow->decorations = FALSE;
+	appWindow->decorations = xfc->decorations;
 	appWindow->fullscreen = FALSE;
 	appWindow->local_move.state = LMS_NOT_ACTIVE;
 	appWindow->is_mapped = FALSE;
@@ -1072,6 +1086,7 @@ BOOL xf_AppWindowCreate(xfContext* xfc, xfAppWindow* appWindow)
 	appWindow->minimized = FALSE;
 	appWindow->rail_ignore_configure = FALSE;
 	appWindow->rail_fullscreen_normalizing = FALSE;
+	appWindow->lastWndSizeUpdate = 0;
 
 	WINPR_ASSERT(xfc->depth != 0);
 	appWindow->handle = LogDynAndXCreateWindow(
@@ -1388,6 +1403,32 @@ void xf_UpdateWindowArea(xfContext* xfc, xfAppWindow* appWindow, int x, int y, i
 		return;
 
 	if (appWindow->surfaceId < UINT16_MAX)
+	{
+		/* need a full window update */
+		if (appWindow->is_mapped && appWindow->surfaceStale)
+			xf_AppWindowRepaintFromSurface(xfc, appWindow->windowId, appWindow->surfaceId);
+
+		/* The pixmap holds what xf_AppUpdateWindowFromSurface() painted last. */
+		else if (!appWindow->surfaceStale && (appWindow->pixmap != 0) && (x >= 0) && (y >= 0) &&
+		         (width > 0) && (height > 0))
+		{
+			LogDynAndXCopyArea(xfc->log, xfc->display, appWindow->pixmap, appWindow->handle,
+			                   appWindow->gc, x, y, WINPR_ASSERTING_INT_CAST(uint32_t, width),
+			                   WINPR_ASSERTING_INT_CAST(uint32_t, height), x, y);
+			LogDynAndXFlush(xfc->log, xfc->display);
+		}
+		return;
+	}
+
+	/*
+	 * With GFX a RemoteApp window shows its own surface, see xf_AppUpdateWindowFromSurface().
+	 * Until the server maps a surface to the window it has no content. xfc->image contains the
+	 * hidden server desktop (black, wallpaper), painting from it flashes that in a new window,
+	 * e.g. the Snap bar when dragging a window. Leave the window empty until its surface is
+	 * mapped.
+	 */
+	const rdpGdi* gdi = xfc->common.context.gdi;
+	if (gdi && gdi->gfx)
 		return;
 
 	ax = x + appWindow->windowOffsetX;
@@ -1533,12 +1574,33 @@ UINT xf_AppUpdateWindowFromSurface(xfContext* xfc, gdiGfxSurface* surface)
 	if (!appWindow)
 	{
 		WLog_VRB(TAG, "Failed to find a window for id=0x%08" PRIx64, surface->windowId);
+		region16_clear(&surface->invalidRegion);
 		return CHANNEL_RC_OK;
 	}
 
-	const BOOL surfaceChanged = (appWindow->surfaceId != surface->surfaceId);
+	BOOL surfaceChanged = (appWindow->surfaceId != surface->surfaceId);
 	if (surfaceChanged)
 		appWindow->surfaceId = surface->surfaceId;
+
+	/* The server keeps sending updates for windows that are not visible on the
+	 * client, e.g. minimized ones or the hidden desktop window ("Program
+	 * Manager") that spans the whole virtual screen. Uploading those pixels into
+	 * an unmapped X window is wasted work (~100 MB per frame on a large
+	 * multi-monitor setup), so skip it and repaint the whole window once it is
+	 * mapped again, see xf_AppWindowRepaintFromSurface(). */
+	if (!appWindow->is_mapped)
+	{
+		appWindow->surfaceStale = TRUE;
+		region16_clear(&surface->invalidRegion);
+		xf_rail_return_window(appWindow, FALSE);
+		return CHANNEL_RC_OK;
+	}
+
+	if (appWindow->surfaceStale)
+	{
+		appWindow->surfaceStale = FALSE;
+		surfaceChanged = TRUE;
+	}
 
 	const BOOL maximized = (appWindow->dwStyle & WS_MAXIMIZE) != 0;
 	const UINT32 winW = WINPR_ASSERTING_INT_CAST(uint32_t, appWindow->width);
@@ -1637,10 +1699,35 @@ UINT xf_AppUpdateWindowFromSurface(xfContext* xfc, gdiGfxSurface* surface)
 
 	rc = CHANNEL_RC_OK;
 fail:
+	/* The invalid region has been painted, reset it like xf_OutputUpdate does for
+	 * output mapped surfaces. Otherwise the damage accumulates across frames until
+	 * the whole window is uploaded again on every single update. */
+	region16_clear(&surface->invalidRegion);
 	xf_rail_return_window(appWindow, FALSE);
 	LogDynAndXFlush(xfc->log, xfc->display);
 
 	return rc;
+}
+
+BOOL xf_AppWindowRepaintFromSurface(xfContext* xfc, UINT64 windowId, UINT32 surfaceId)
+{
+	WINPR_ASSERT(xfc);
+
+	if (surfaceId >= UINT16_MAX)
+		return TRUE;
+
+	rdpGdi* gdi = xfc->common.context.gdi;
+	if (!gdi || !gdi->gfx)
+		return TRUE;
+
+	RdpgfxClientContext* gfx = gdi->gfx;
+	UINT rc = CHANNEL_RC_OK;
+	EnterCriticalSection(&gfx->mux);
+	gdiGfxSurface* surface = gfx->GetSurfaceData(gfx, (UINT16)surfaceId);
+	if (surface && surface->windowMapped && (surface->windowId == windowId))
+		rc = xf_AppUpdateWindowFromSurface(xfc, surface);
+	LeaveCriticalSection(&gfx->mux);
+	return rc == CHANNEL_RC_OK;
 }
 
 BOOL xf_AppWindowResize(xfContext* xfc, xfAppWindow* appWindow)
@@ -1648,15 +1735,29 @@ BOOL xf_AppWindowResize(xfContext* xfc, xfAppWindow* appWindow)
 	WINPR_ASSERT(xfc);
 	WINPR_ASSERT(appWindow);
 
+	const UINT32 width = WINPR_ASSERTING_INT_CAST(uint32_t, appWindow->width);
+	const UINT32 height = WINPR_ASSERTING_INT_CAST(uint32_t, appWindow->height);
+
+	/* Called on every ConfigureNotify, also for plain moves: keep the pixmap and its content
+	 * when the size did not change, it is what an Expose is repainted from. */
+	if ((appWindow->pixmap != 0) && (appWindow->pixmapWidth == width) &&
+	    (appWindow->pixmapHeight == height))
+		return TRUE;
+
 	if (appWindow->pixmap != 0)
 		LogDynAndXFreePixmap(xfc->log, xfc->display, appWindow->pixmap);
 
 	WINPR_ASSERT(xfc->depth != 0);
-	appWindow->pixmap = LogDynAndXCreatePixmap(
-	    xfc->log, xfc->display, xfc->drawable, WINPR_ASSERTING_INT_CAST(uint32_t, appWindow->width),
-	    WINPR_ASSERTING_INT_CAST(uint32_t, appWindow->height),
-	    WINPR_ASSERTING_INT_CAST(uint32_t, xfc->depth));
+	appWindow->pixmap = LogDynAndXCreatePixmap(xfc->log, xfc->display, xfc->drawable, width, height,
+	                                           WINPR_ASSERTING_INT_CAST(uint32_t, xfc->depth));
+	appWindow->pixmapWidth = width;
+	appWindow->pixmapHeight = height;
 	xf_AppWindowDestroyImage(appWindow);
+
+	/* The new pixmap has undefined content, the next paint from the surface has to cover the
+	 * whole window. */
+	if (appWindow->surfaceId < UINT16_MAX)
+		appWindow->surfaceStale = TRUE;
 
 	return appWindow->pixmap != 0;
 }

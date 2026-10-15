@@ -185,19 +185,9 @@ if(WITH_DSP_EXPERIMENTAL)
 endif()
 
 if(WITH_VIDEO_FFMPEG)
-  if(WITH_VAAPI)
+  if(WITH_FFMPEG_HWACCEL)
     include(WarnExperimental)
-    warn_experimental("VAAPI encoder/decoder support for FFMPEG" "-DWITH_VAAPI=OFF")
-  endif()
-
-  if(WITH_VIDEOTOOLBOX)
-    include(WarnExperimental)
-    warn_experimental("VideoToolbox H264 decoding support for FFMPEG" "-DWITH_VIDEOTOOLBOX=OFF")
-
-    find_library(VIDEOTOOLBOX_FRAMEWORK VideoToolbox REQUIRED)
-    find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
-    find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
-    list(APPEND CODEC_LIBS ${VIDEOTOOLBOX_FRAMEWORK} ${COREMEDIA_FRAMEWORK} ${COREVIDEO_FRAMEWORK})
+    warn_experimental("Hardware encoder/decoder support for FFMPEG" "-DWITH_FFMPEG_HWACCEL=OFF")
   endif()
 
   set(CODEC_SRCS ${CODEC_SRCS} h264_ffmpeg.c)
@@ -214,8 +204,8 @@ endif()
 
 if(ANDROID AND WITH_MEDIACODEC)
   include(WarnExperimental)
-  warn_experimental("Experimental encoders/decoders for H264" "-DWITH_MEDIACODEC=OFF")
-  list(APPEND CODEC_SRCS h264_mediacodec.c)
+  warn_experimental("Experimental encoders/decoders for H264 and AAC" "-DWITH_MEDIACODEC=OFF")
+  list(APPEND CODEC_SRCS h264_mediacodec.c dsp_mediacodec.c)
 
   find_library(MEDIACODEC mediandk REQUIRED)
   list(APPEND CODEC_LIBS ${MEDIACODEC})

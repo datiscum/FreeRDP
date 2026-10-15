@@ -49,7 +49,12 @@ static BOOL yuv_ensure_buffer(H264_CONTEXT* h264, UINT32 stride, UINT32 width, U
 		return FALSE;
 
 	if (stride == 0)
+	{
+		const UINT32 pad = width % 16;
 		stride = width;
+		if (pad > 0)
+			width += 16 - pad;
+	}
 
 	/* Add padding lines. Allows relaxing bounds checks in decoder functions */
 	stride += 32 - stride % 16;
@@ -108,24 +113,25 @@ BOOL avc420_ensure_buffer(H264_CONTEXT* h264, UINT32 stride, UINT32 width, UINT3
 	return yuv_ensure_buffer(h264, stride, width, height);
 }
 
-static BOOL isRectValid(UINT32 width, UINT32 height, const RECTANGLE_16* rect)
+WINPR_ATTR_NODISCARD
+static BOOL isRectValid(wLog* log, size_t pos, UINT32 width, UINT32 height,
+                        const RECTANGLE_16* rect)
 {
 	WINPR_ASSERT(rect);
-	if (rect->left > width)
+	if ((rect->left > width) || (rect->right > width) || (rect->left >= rect->right) ||
+	    (rect->top > height) || (rect->bottom > height) || (rect->top >= rect->bottom))
+	{
+		char buffer[64] = WINPR_C_ARRAY_INIT;
+		WLog_Print(log, WLOG_WARN,
+		           "Rectangle %" PRIuz " %s outside of bounding frame %" PRIu32 "x%" PRIu32, pos,
+		           rectangle_to_string(rect, buffer, sizeof(buffer)), width, height);
 		return FALSE;
-	if (rect->right > width)
-		return FALSE;
-	if (rect->left >= rect->right)
-		return FALSE;
-	if (rect->top > height)
-		return FALSE;
-	if (rect->bottom > height)
-		return FALSE;
-	if (rect->top >= rect->bottom)
-		return FALSE;
+	}
+
 	return TRUE;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL areRectsValid(wLog* log, UINT32 width, UINT32 height, const RECTANGLE_16* rects,
                           UINT32 count)
 {
@@ -133,18 +139,13 @@ static BOOL areRectsValid(wLog* log, UINT32 width, UINT32 height, const RECTANGL
 	for (size_t x = 0; x < count; x++)
 	{
 		const RECTANGLE_16* rect = &rects[x];
-		if (!isRectValid(width, height, rect))
-		{
-			char buffer[64] = WINPR_C_ARRAY_INIT;
-			WLog_Print(log, WLOG_WARN,
-			           "Rectangle %" PRIuz " %s outside of bounding frame %" PRIu32 "x%" PRIu32, x,
-			           rectangle_to_string(rect, buffer, sizeof(buffer)), width, height);
+		if (!isRectValid(log, x, width, height, rect))
 			return FALSE;
-		}
 	}
 	return TRUE;
 }
 
+WINPR_ATTR_NODISCARD
 static int log_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize,
                           const RECTANGLE_16* rects, UINT32 nrRects)
 {
@@ -158,6 +159,10 @@ static int log_decompress(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSi
 		WLog_Print(h264->log, WLOG_WARN, "H264 decompress failed with %d", status);
 		return status;
 	}
+
+	/* no picture decoded, nothing to validate */
+	if (status == 0)
+		return 0;
 
 	/* some server implementations (krdc) use H264 frames smaller than the surface sizes,
 	 * validate the regions against this size as well */
@@ -233,6 +238,7 @@ INT32 avc420_decompress_to_vaapi(H264_CONTEXT* h264, const BYTE* pSrcData, UINT3
 	return 1;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL allocate_h264_metablock(UINT32 QP, RECTANGLE_16* rectangles,
                                     RDPGFX_H264_METABLOCK* meta, size_t count)
 {
@@ -267,6 +273,7 @@ static BOOL allocate_h264_metablock(UINT32 QP, RECTANGLE_16* rectangles,
 	return TRUE;
 }
 
+WINPR_ATTR_NODISCARD
 static inline BOOL diff_tile(const RECTANGLE_16* regionRect, BYTE* pYUVData[3],
                              BYTE* pOldYUVData[3], UINT32 const iStride[3])
 {
@@ -301,6 +308,7 @@ static inline BOOL diff_tile(const RECTANGLE_16* regionRect, BYTE* pYUVData[3],
 	return FALSE;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL detect_changes(BOOL firstFrameDone, const UINT32 QP, const RECTANGLE_16* regionRect,
                            BYTE* pYUVData[3], BYTE* pOldYUVData[3], UINT32 const iStride[3],
                            RDPGFX_H264_METABLOCK* meta)
@@ -619,6 +627,7 @@ fail:
 	return FALSE;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL avc444_process_rects(H264_CONTEXT* h264, const BYTE* pSrcData, UINT32 SrcSize,
                                  BYTE* pDstData, UINT32 DstFormat, UINT32 nDstStep,
                                  WINPR_ATTR_UNUSED UINT32 nDstWidth, UINT32 nDstHeight,
@@ -630,8 +639,11 @@ static BOOL avc444_process_rects(H264_CONTEXT* h264, const BYTE* pSrcData, UINT3
 	BYTE** ppYUVDstData = h264->pYUV444Data;
 	const UINT32* piStride = h264->iStride;
 
-	if (log_decompress(h264, pSrcData, SrcSize, rects, nrRects) < 0)
+	const int status = log_decompress(h264, pSrcData, SrcSize, rects, nrRects);
+	if (status < 0)
 		return FALSE;
+	if (status == 0)
+		return TRUE;
 
 	pYUVData[0] = h264->pYUVData[0];
 	pYUVData[1] = h264->pYUVData[1];
@@ -753,6 +765,7 @@ INT32 avc444_decompress(H264_CONTEXT* h264, BYTE op, const RECTANGLE_16* regionR
 static INIT_ONCE subsystems_once = INIT_ONCE_STATIC_INIT;
 static const H264_CONTEXT_SUBSYSTEM* subSystems[MAX_SUBSYSTEMS] = WINPR_C_ARRAY_INIT;
 
+WINPR_ATTR_NODISCARD
 static BOOL CALLBACK h264_register_subsystems(WINPR_ATTR_UNUSED PINIT_ONCE once,
                                               WINPR_ATTR_UNUSED PVOID param,
                                               WINPR_ATTR_UNUSED PVOID* context)
@@ -786,6 +799,7 @@ static BOOL CALLBACK h264_register_subsystems(WINPR_ATTR_UNUSED PINIT_ONCE once,
 	return i > 0;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL h264_context_init(H264_CONTEXT* h264)
 {
 	if (!h264)
@@ -937,8 +951,11 @@ BOOL h264_context_set_option(H264_CONTEXT* h264, H264_CONTEXT_OPTION option, UIN
 			h264->UsageType = value;
 			return TRUE;
 		case H264_CONTEXT_OPTION_HW_ACCEL:
+			if (h264->hwAccel == value)
+				return TRUE;
 			h264->hwAccel = (value);
-			return TRUE;
+			IFCALL(h264->subsystem->Uninit, h264);
+			return IFCALLRESULT(TRUE, h264->subsystem->Init, h264);
 		default:
 			WLog_Print(h264->log, WLOG_WARN, "Unknown H264_CONTEXT_OPTION[0x%08" PRIx32 "]",
 			           option);
@@ -979,7 +996,9 @@ UINT32 h264_context_get_option(H264_CONTEXT* h264, H264_CONTEXT_OPTION option)
 		case H264_CONTEXT_OPTION_USAGETYPE:
 			return h264->UsageType;
 		case H264_CONTEXT_OPTION_HW_ACCEL:
-			return h264->hwAccel || h264->hwOutputAvailable;
+			return h264->hwAccel;
+		case H264_CONTEXT_OPTION_VAAPI_OUTPUT:
+			return h264->hwOutputAvailable;
 		default:
 			WLog_Print(h264->log, WLOG_WARN, "Unknown H264_CONTEXT_OPTION[0x%08" PRIx32 "]",
 			           option);

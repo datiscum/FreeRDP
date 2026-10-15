@@ -50,26 +50,30 @@ static wLog* scard_log(void)
 	smartcard_unpack_redir_scard_handle_((log), (s), (context), (index), __FILE__, __func__, \
 	                                     __LINE__)
 
-static LONG smartcard_unpack_redir_scard_context_(wLog* log, wStream* s,
-                                                  REDIR_SCARDCONTEXT* context, UINT32* index,
-                                                  UINT32* ppbContextNdrPtr, const char* file,
-                                                  const char* function, size_t line);
-static LONG smartcard_pack_redir_scard_context(wLog* log, wStream* s,
-                                               const REDIR_SCARDCONTEXT* context, UINT32* index);
-static LONG smartcard_unpack_redir_scard_handle_(wLog* log, wStream* s, REDIR_SCARDHANDLE* handle,
-                                                 UINT32* index, const char* file,
-                                                 const char* function, size_t line);
-static LONG smartcard_pack_redir_scard_handle(wLog* log, wStream* s,
-                                              const REDIR_SCARDHANDLE* handle, UINT32* index);
-static LONG smartcard_unpack_redir_scard_context_ref(wLog* log, wStream* s, UINT32 pbContextNdrPtr,
-                                                     REDIR_SCARDCONTEXT* context);
-static LONG smartcard_pack_redir_scard_context_ref(wLog* log, wStream* s,
-                                                   const REDIR_SCARDCONTEXT* context);
+WINPR_ATTR_NODISCARD static LONG
+smartcard_unpack_redir_scard_context_(wLog* log, wStream* s, REDIR_SCARDCONTEXT* context,
+                                      UINT32* index, UINT32* ppbContextNdrPtr, const char* file,
+                                      const char* function, size_t line);
+WINPR_ATTR_NODISCARD static LONG
+smartcard_pack_redir_scard_context(wLog* log, wStream* s, const REDIR_SCARDCONTEXT* context,
+                                   UINT32* index);
+WINPR_ATTR_NODISCARD static LONG
+smartcard_unpack_redir_scard_handle_(wLog* log, wStream* s, REDIR_SCARDHANDLE* handle,
+                                     UINT32* index, const char* file, const char* function,
+                                     size_t line);
+WINPR_ATTR_NODISCARD static LONG smartcard_pack_redir_scard_handle(wLog* log, wStream* s,
+                                                                   const REDIR_SCARDHANDLE* handle,
+                                                                   UINT32* index);
+WINPR_ATTR_NODISCARD static LONG
+smartcard_unpack_redir_scard_context_ref(wLog* log, wStream* s, UINT32 pbContextNdrPtr,
+                                         REDIR_SCARDCONTEXT* context);
+WINPR_ATTR_NODISCARD static LONG
+smartcard_pack_redir_scard_context_ref(wLog* log, wStream* s, const REDIR_SCARDCONTEXT* context);
 
-static LONG smartcard_unpack_redir_scard_handle_ref(wLog* log, wStream* s,
-                                                    REDIR_SCARDHANDLE* handle);
-static LONG smartcard_pack_redir_scard_handle_ref(wLog* log, wStream* s,
-                                                  const REDIR_SCARDHANDLE* handle);
+WINPR_ATTR_NODISCARD static LONG smartcard_unpack_redir_scard_handle_ref(wLog* log, wStream* s,
+                                                                         REDIR_SCARDHANDLE* handle);
+WINPR_ATTR_NODISCARD static LONG
+smartcard_pack_redir_scard_handle_ref(wLog* log, wStream* s, const REDIR_SCARDHANDLE* handle);
 
 typedef enum
 {
@@ -111,8 +115,9 @@ static BOOL smartcard_ndr_pointer_read_(wLog* log, wStream* s, UINT32* index, UI
 	return TRUE;
 }
 
-static LONG smartcard_ndr_read_ex(wLog* log, wStream* s, BYTE** data, size_t min,
-                                  size_t elementSize, const ndr_ptr_t type, size_t* plen)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_ex(wLog* log, wStream* s, BYTE** data,
+                                                       size_t min, size_t elementSize,
+                                                       const ndr_ptr_t type, size_t* plen)
 {
 	size_t len = 0;
 	size_t offset = 0;
@@ -211,12 +216,13 @@ static LONG smartcard_ndr_read_ex(wLog* log, wStream* s, BYTE** data, size_t min
 	return STATUS_SUCCESS;
 }
 
-static LONG smartcard_ndr_read(wLog* log, wStream* s, BYTE** data, size_t min, size_t elementSize,
-                               const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read(wLog* log, wStream* s, BYTE** data, size_t min,
+                                                    size_t elementSize, const ndr_ptr_t type)
 {
 	return smartcard_ndr_read_ex(log, s, data, min, elementSize, type, nullptr);
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL smartcard_ndr_pointer_write(wStream* s, UINT32* index, UINT32 length)
 {
 	const UINT32 ndrPtr = 0x20000 + (*index) * 4;
@@ -236,8 +242,8 @@ static BOOL smartcard_ndr_pointer_write(wStream* s, UINT32* index, UINT32 length
 	return TRUE;
 }
 
-static LONG smartcard_ndr_write(wStream* s, const BYTE* data, UINT32 size, UINT32 elementSize,
-                                const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_write(wStream* s, const BYTE* data, UINT32 size,
+                                                     UINT32 elementSize, const ndr_ptr_t type)
 {
 	const UINT32 offset = 0;
 	const UINT32 len = size;
@@ -262,7 +268,7 @@ static LONG smartcard_ndr_write(wStream* s, const BYTE* data, UINT32 size, UINT3
 			return SCARD_E_INVALID_PARAMETER;
 	}
 
-	if (!Stream_EnsureRemainingCapacity(s, required + dataLen + 4))
+	if (!Stream_EnsureRemainingCapacity(s, required))
 		return STATUS_BUFFER_TOO_SMALL;
 
 	switch (type)
@@ -281,6 +287,9 @@ static LONG smartcard_ndr_write(wStream* s, const BYTE* data, UINT32 size, UINT3
 			return SCARD_E_INVALID_PARAMETER;
 	}
 
+	if (!Stream_EnsureRemainingCapacity(s, dataLen))
+		return STATUS_BUFFER_TOO_SMALL;
+
 	if (data)
 		Stream_Write(s, data, dataLen);
 	else
@@ -288,8 +297,9 @@ static LONG smartcard_ndr_write(wStream* s, const BYTE* data, UINT32 size, UINT3
 	return smartcard_pack_write_size_align(s, dataLen, 4);
 }
 
-static LONG smartcard_ndr_write_state(wStream* s, const ReaderState_Return* data, UINT32 size,
-                                      const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_write_state(wStream* s,
+                                                           const ReaderState_Return* data,
+                                                           UINT32 size, const ndr_ptr_t type)
 {
 	union
 	{
@@ -309,8 +319,9 @@ static LONG smartcard_ndr_write_state(wStream* s, const ReaderState_Return* data
 	return smartcard_ndr_write(s, cnv.data, size, sizeof(ReaderState_Return), type);
 }
 
-static LONG smartcard_ndr_read_state(wLog* log, wStream* s, ReaderState_Return** data, size_t min,
-                                     const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_state(wLog* log, wStream* s,
+                                                          ReaderState_Return** data, size_t min,
+                                                          const ndr_ptr_t type)
 {
 	union
 	{
@@ -339,8 +350,9 @@ static LONG smartcard_ndr_read_state(wLog* log, wStream* s, ReaderState_Return**
 	return status;
 }
 
-static LONG smartcard_ndr_read_atrmask(wLog* log, wStream* s, LocateCards_ATRMask** data,
-                                       size_t min, const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_atrmask(wLog* log, wStream* s,
+                                                            LocateCards_ATRMask** data, size_t min,
+                                                            const ndr_ptr_t type)
 {
 	union
 	{
@@ -372,8 +384,9 @@ static LONG smartcard_ndr_read_atrmask(wLog* log, wStream* s, LocateCards_ATRMas
 	return SCARD_S_SUCCESS;
 }
 
-static LONG smartcard_ndr_read_fixed_string_a(wLog* log, wStream* s, CHAR** data, size_t min,
-                                              const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_fixed_string_a(wLog* log, wStream* s,
+                                                                   CHAR** data, size_t min,
+                                                                   const ndr_ptr_t type)
 {
 	union
 	{
@@ -384,8 +397,9 @@ static LONG smartcard_ndr_read_fixed_string_a(wLog* log, wStream* s, CHAR** data
 	return smartcard_ndr_read(log, s, u.ppv, min, sizeof(CHAR), type);
 }
 
-static LONG smartcard_ndr_read_fixed_string_w(wLog* log, wStream* s, WCHAR** data, size_t min,
-                                              const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_fixed_string_w(wLog* log, wStream* s,
+                                                                   WCHAR** data, size_t min,
+                                                                   const ndr_ptr_t type)
 {
 	union
 	{
@@ -396,7 +410,8 @@ static LONG smartcard_ndr_read_fixed_string_w(wLog* log, wStream* s, WCHAR** dat
 	return smartcard_ndr_read(log, s, u.ppv, min, sizeof(WCHAR), type);
 }
 
-static LONG smartcard_ndr_read_a(wLog* log, wStream* s, CHAR** data, const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_a(wLog* log, wStream* s, CHAR** data,
+                                                      const ndr_ptr_t type)
 {
 	union
 	{
@@ -407,7 +422,8 @@ static LONG smartcard_ndr_read_a(wLog* log, wStream* s, CHAR** data, const ndr_p
 	return smartcard_ndr_read(log, s, u.ppv, 0, sizeof(CHAR), type);
 }
 
-static LONG smartcard_ndr_read_w(wLog* log, wStream* s, WCHAR** data, const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_w(wLog* log, wStream* s, WCHAR** data,
+                                                      const ndr_ptr_t type)
 {
 	union
 	{
@@ -418,7 +434,8 @@ static LONG smartcard_ndr_read_w(wLog* log, wStream* s, WCHAR** data, const ndr_
 	return smartcard_ndr_read(log, s, u.ppv, 0, sizeof(WCHAR), type);
 }
 
-static LONG smartcard_ndr_write_w(wStream* s, const WCHAR* data, UINT32 size, const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_write_w(wStream* s, const WCHAR* data, UINT32 size,
+                                                       const ndr_ptr_t type)
 {
 	union
 	{
@@ -429,7 +446,8 @@ static LONG smartcard_ndr_write_w(wStream* s, const WCHAR* data, UINT32 size, co
 	return smartcard_ndr_write(s, cnv.bp, size, sizeof(WCHAR), type);
 }
 
-static LONG smartcard_ndr_write_a(wStream* s, const CHAR* data, UINT32 size, const ndr_ptr_t type)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_write_a(wStream* s, const CHAR* data, UINT32 size,
+                                                       const ndr_ptr_t type)
 {
 	union
 	{
@@ -440,7 +458,7 @@ static LONG smartcard_ndr_write_a(wStream* s, const CHAR* data, UINT32 size, con
 	return smartcard_ndr_write(s, cnv.bp, size, sizeof(CHAR), type);
 }
 
-static LONG smartcard_ndr_read_u(wLog* log, wStream* s, UUID** data)
+WINPR_ATTR_NODISCARD static LONG smartcard_ndr_read_u(wLog* log, wStream* s, UUID** data)
 {
 	union
 	{
@@ -1635,9 +1653,9 @@ static void smartcard_trace_device_type_id_return(wLog* log, const GetDeviceType
 	WLog_Print(log, g_LogLevel, "}");
 }
 
-static LONG smartcard_unpack_common_context_and_string_a(wLog* log, wStream* s,
-                                                         REDIR_SCARDCONTEXT* phContext,
-                                                         CHAR** pszReaderName)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_unpack_common_context_and_string_a(wLog* log, wStream* s, REDIR_SCARDCONTEXT* phContext,
+                                             CHAR** pszReaderName)
 {
 	UINT32 index = 0;
 	UINT32 pbContextNdrPtr = 0;
@@ -1660,9 +1678,9 @@ static LONG smartcard_unpack_common_context_and_string_a(wLog* log, wStream* s,
 	return SCARD_S_SUCCESS;
 }
 
-static LONG smartcard_unpack_common_context_and_string_w(wLog* log, wStream* s,
-                                                         REDIR_SCARDCONTEXT* phContext,
-                                                         WCHAR** pszReaderName)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_unpack_common_context_and_string_w(wLog* log, wStream* s, REDIR_SCARDCONTEXT* phContext,
+                                             WCHAR** pszReaderName)
 {
 	UINT32 index = 0;
 	UINT32 pbContextNdrPtr = 0;
@@ -1867,8 +1885,9 @@ void smartcard_scard_handle_native_to_redir(REDIR_SCARDHANDLE* handle, SCARDHAND
 
 #define smartcard_context_supported(log, size) \
 	smartcard_context_supported_((log), (size), __FILE__, __func__, __LINE__)
-static LONG smartcard_context_supported_(wLog* log, uint32_t size, const char* file,
-                                         const char* fkt, size_t line)
+WINPR_ATTR_NODISCARD static LONG smartcard_context_supported_(wLog* log, uint32_t size,
+                                                              const char* file, const char* fkt,
+                                                              size_t line)
 {
 	switch (size)
 	{
@@ -1910,6 +1929,12 @@ LONG smartcard_unpack_redir_scard_context_(wLog* log, wStream* s, REDIR_SCARDCON
 		return status;
 
 	Stream_Read_UINT32(s, context->cbContext); /* cbContext (4 bytes) */
+	if (context->cbContext > 16)
+	{
+		WLog_Print(log, WLOG_WARN, "REDIR_SCARDCONTEXT cbContext (%" PRIu32 ") > 16",
+		           context->cbContext);
+		return ERROR_INVALID_DATA;
+	}
 
 	if (!smartcard_ndr_pointer_read_(log, s, index, &pbContextNdrPtr, file, function, line))
 		return ERROR_INVALID_DATA;
@@ -2255,6 +2280,15 @@ LONG smartcard_pack_list_reader_groups_return(wStream* s, const ListReaderGroups
 	if (!Stream_EnsureRemainingCapacity(s, 4))
 		return SCARD_E_NO_MEMORY;
 
+	if (cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "2.2.3.4 ListReaderGroups_Return and ListReaders_Return cBytes (%" PRIu32
+		           ") > 65536",
+		           cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	Stream_Write_UINT32(s, cBytes); /* cBytes (4 bytes) */
 	if (!smartcard_ndr_pointer_write(s, &index, cBytes))
 		return SCARD_E_NO_MEMORY;
@@ -2277,6 +2311,14 @@ LONG smartcard_unpack_list_reader_groups_return(wStream* s, ListReaderGroups_Ret
 		return STATUS_BUFFER_TOO_SMALL;
 
 	const UINT32 cBytes = Stream_Get_UINT32(s);
+	if (cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "2.2.3.4 ListReaderGroups_Return and ListReaders_Return cBytes (%" PRIu32
+		           ") > 65536",
+		           cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &mszNdrPtr))
 		return ERROR_INVALID_DATA;
@@ -2312,6 +2354,14 @@ LONG smartcard_unpack_list_readers_call(wStream* s, ListReaders_Call* call, BOOL
 		return STATUS_BUFFER_TOO_SMALL;
 
 	const UINT32 cBytes = Stream_Get_UINT32(s);
+	if (cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "2.2.3.4 ListReaderGroups_Return and ListReaders_Return cBytes (%" PRIu32
+		           ") > 65536",
+		           cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 	if (!smartcard_ndr_pointer_read(log, s, &index, &mszGroupsNdrPtr))
 		return ERROR_INVALID_DATA;
 
@@ -2355,6 +2405,15 @@ LONG smartcard_pack_list_readers_return(wStream* s, const ListReaders_Return* re
 		return SCARD_F_INTERNAL_ERROR;
 	}
 
+	if (size > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "2.2.3.4 ListReaderGroups_Return and ListReaders_Return cBytes (%" PRIu32
+		           ") > 65536",
+		           size);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	Stream_Write_UINT32(s, size); /* cBytes (4 bytes) */
 	if (!smartcard_ndr_pointer_write(s, &index, size))
 		return SCARD_E_NO_MEMORY;
@@ -2365,8 +2424,10 @@ LONG smartcard_pack_list_readers_return(wStream* s, const ListReaders_Return* re
 	return ret->ReturnCode;
 }
 
-static LONG smartcard_unpack_connect_common(wLog* log, wStream* s, Connect_Common_Call* common,
-                                            UINT32* index, UINT32* ppbContextNdrPtr)
+WINPR_ATTR_NODISCARD static LONG smartcard_unpack_connect_common(wLog* log, wStream* s,
+                                                                 Connect_Common_Call* common,
+                                                                 UINT32* index,
+                                                                 UINT32* ppbContextNdrPtr)
 {
 	WINPR_ASSERT(common);
 	LONG status = smartcard_unpack_redir_scard_context(log, s, &(common->handles.hContext), index,
@@ -2634,12 +2695,21 @@ static void smartcard_trace_get_status_change_a_call(wLog* log, const GetStatusC
 	WLog_Print(log, g_LogLevel, "}");
 }
 
-static LONG smartcard_unpack_reader_state_a(wLog* log, wStream* s, LPSCARD_READERSTATEA* ppcReaders,
-                                            UINT32 cReaders, UINT32* ptrIndex)
+WINPR_ATTR_NODISCARD static LONG smartcard_unpack_reader_state_a(wLog* log, wStream* s,
+                                                                 LPSCARD_READERSTATEA* ppcReaders,
+                                                                 UINT32 cReaders, UINT32* ptrIndex)
 {
 	LONG status = SCARD_E_NO_MEMORY;
 
 	WINPR_ASSERT(ppcReaders || (cReaders == 0));
+	if (cReaders > UINT8_MAX)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "Too many readers(%" PRIu32 "), rejecting request. Limited to <= %d", cReaders,
+		           UINT8_MAX);
+		return SCARD_E_WRITE_TOO_MANY;
+	}
+
 	if (!Stream_CheckAndLogRequiredLengthWLog(log, s, 4))
 		return status;
 
@@ -2677,10 +2747,10 @@ static LONG smartcard_unpack_reader_state_a(wLog* log, wStream* s, LPSCARD_READE
 		Stream_Read_UINT32(s, readerState->cbAtr);          /* cbAtr (4 bytes) */
 		if (readerState->cbAtr > ARRAYSIZE(readerState->rgbAtr))
 		{
-			WLog_Print(log, WLOG_ERROR,
+			WLog_Print(log, WLOG_WARN,
 			           "SCARD_READERSTATEA[%" PRIu32 "]::cbAtr %" PRIu32 " exceeds %" PRIuz, index,
 			           readerState->cbAtr, (size_t)ARRAYSIZE(readerState->rgbAtr));
-			goto fail;
+			readerState->cbAtr = ARRAYSIZE(readerState->rgbAtr);
 		}
 		Stream_Read(s, readerState->rgbAtr, 36);            /* rgbAtr [0..36] (36 bytes) */
 	}
@@ -2694,6 +2764,8 @@ static LONG smartcard_unpack_reader_state_a(wLog* log, wStream* s, LPSCARD_READE
 			continue;
 		status = smartcard_ndr_read_a(log, s, &readerState->szReader, NDR_PTR_FULL);
 		if (status != SCARD_S_SUCCESS)
+			goto fail;
+		if (!readerState->szReader)
 			goto fail;
 	}
 
@@ -2714,12 +2786,22 @@ fail:
 	return status;
 }
 
-static LONG smartcard_unpack_reader_state_w(wLog* log, wStream* s, LPSCARD_READERSTATEW* ppcReaders,
-                                            UINT32 cReaders, UINT32* ptrIndex)
+WINPR_ATTR_NODISCARD static LONG smartcard_unpack_reader_state_w(wLog* log, wStream* s,
+                                                                 LPSCARD_READERSTATEW* ppcReaders,
+                                                                 UINT32 cReaders, UINT32* ptrIndex)
 {
 	LONG status = SCARD_E_NO_MEMORY;
 
 	WINPR_ASSERT(ppcReaders || (cReaders == 0));
+
+	if (cReaders > UINT8_MAX)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "Too many readers(%" PRIu32 "), rejecting request. Limited to <= %d", cReaders,
+		           UINT8_MAX);
+		return SCARD_E_WRITE_TOO_MANY;
+	}
+
 	if (!Stream_CheckAndLogRequiredLengthWLog(log, s, 4))
 		return status;
 
@@ -2758,10 +2840,10 @@ static LONG smartcard_unpack_reader_state_w(wLog* log, wStream* s, LPSCARD_READE
 		Stream_Read_UINT32(s, readerState->cbAtr);          /* cbAtr (4 bytes) */
 		if (readerState->cbAtr > ARRAYSIZE(readerState->rgbAtr))
 		{
-			WLog_Print(log, WLOG_ERROR,
+			WLog_Print(log, WLOG_WARN,
 			           "SCARD_READERSTATEW[%" PRIu32 "]::cbAtr %" PRIu32 " exceeds %" PRIuz, index,
-			           readerState->cbAtr, (size_t)ARRAYSIZE(readerState->rgbAtr));
-			goto fail;
+			           readerState->cbAtr, ARRAYSIZE(readerState->rgbAtr));
+			readerState->cbAtr = ARRAYSIZE(readerState->rgbAtr);
 		}
 		Stream_Read(s, readerState->rgbAtr, 36);            /* rgbAtr [0..36] (36 bytes) */
 	}
@@ -2776,6 +2858,8 @@ static LONG smartcard_unpack_reader_state_w(wLog* log, wStream* s, LPSCARD_READE
 
 		status = smartcard_ndr_read_w(log, s, &readerState->szReader, NDR_PTR_FULL);
 		if (status != SCARD_S_SUCCESS)
+			goto fail;
+		if (!readerState->szReader)
 			goto fail;
 	}
 
@@ -2821,6 +2905,14 @@ LONG smartcard_unpack_get_status_change_a_call(wStream* s, GetStatusChangeA_Call
 
 	Stream_Read_UINT32(s, call->dwTimeOut); /* dwTimeOut (4 bytes) */
 	const UINT32 cReaders = Stream_Get_UINT32(s); /* cReaders (4 bytes) */
+	if (cReaders > 11)
+	{
+		WLog_Print(log, WLOG_WARN,
+		           "2.2.2.11 GetStatusChangeA_Call: cReaders must be <= 11, got %" PRIu32,
+		           cReaders);
+		return ERROR_INVALID_DATA;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index, &ndrPtr))
 		return ERROR_INVALID_DATA;
 
@@ -2866,6 +2958,14 @@ LONG smartcard_unpack_get_status_change_w_call(wStream* s, GetStatusChangeW_Call
 
 	Stream_Read_UINT32(s, call->dwTimeOut); /* dwTimeOut (4 bytes) */
 	const UINT32 cReaders = Stream_Get_UINT32(s); /* cReaders (4 bytes) */
+	if (cReaders > 11)
+	{
+		WLog_Print(log, WLOG_WARN,
+		           "2.2.2.12 GetStatusChangeW_Call: cReaders must be <= 11, got %" PRIu32,
+		           cReaders);
+		return ERROR_INVALID_DATA;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index, &ndrPtr))
 		return ERROR_INVALID_DATA;
 
@@ -2900,6 +3000,15 @@ LONG smartcard_pack_get_status_change_return(wStream* s, const GetStatusChange_R
 	LONG status = 0;
 	UINT32 cReaders = ret->cReaders;
 	UINT32 index = 0;
+
+	if (ret->cReaders > 10)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "2.2.3.5 LocateCards_Return and GetStatusChange_Return cReaders(%" PRIu32
+		           ") > 10",
+		           ret->cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	smartcard_trace_get_status_change_return(log, ret, unicode);
 	if ((ret->ReturnCode != SCARD_S_SUCCESS) && (ret->ReturnCode != SCARD_E_TIMEOUT))
@@ -3064,6 +3173,12 @@ LONG smartcard_pack_status_return(wStream* s, const Status_Return* ret, BOOL uni
 	if (!Stream_EnsureRemainingCapacity(s, 4))
 		return SCARD_F_INTERNAL_ERROR;
 
+	if (cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.10 Status_Return cBytes(%" PRIu32 ") > 65536", cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	Stream_Write_UINT32(s, cBytes); /* cBytes (4 bytes) */
 	if (!smartcard_ndr_pointer_write(s, &index, cBytes))
 		return SCARD_E_NO_MEMORY;
@@ -3074,6 +3189,14 @@ LONG smartcard_pack_status_return(wStream* s, const Status_Return* ret, BOOL uni
 	Stream_Write_UINT32(s, ret->dwState);            /* dwState (4 bytes) */
 	Stream_Write_UINT32(s, ret->dwProtocol);         /* dwProtocol (4 bytes) */
 	Stream_Write(s, ret->pbAtr, sizeof(ret->pbAtr)); /* pbAtr (32 bytes) */
+
+	if (ret->cbAtrLen > 32)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.10 Status_Return cbAtrLen(%" PRIu32 ") > 32",
+		           ret->cbAtrLen);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	Stream_Write_UINT32(s, ret->cbAtrLen);           /* cbAtrLen (4 bytes) */
 	status = smartcard_ndr_write(s, ret->mszReaderNames, cBytes, 1, NDR_PTR_SIMPLE);
 	if (status != SCARD_S_SUCCESS)
@@ -3092,6 +3215,11 @@ LONG smartcard_unpack_status_return(wStream* s, Status_Return* ret, BOOL unicode
 		return STATUS_BUFFER_TOO_SMALL;
 
 	const UINT32 cBytes = Stream_Get_UINT32(s);
+	if (cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.10 Status_Return cBytes(%" PRIu32 ") > 65536", cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &mszNdrPtr))
 		return ERROR_INVALID_DATA;
@@ -3183,6 +3311,12 @@ LONG smartcard_pack_get_attrib_return(wStream* s, const GetAttrib_Return* ret, D
 		if (cbAttrCallLen < cbAttrLen)
 			cbAttrLen = cbAttrCallLen;
 	}
+	if (cbAttrLen > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.12 GetAttrib_Return cbAttrLen(%" PRIu32 ") > 65536",
+		           cbAttrLen);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 	Stream_Write_UINT32(s, cbAttrLen); /* cbAttrLen (4 bytes) */
 	if (!smartcard_ndr_pointer_write(s, &index, cbAttrLen))
 		return SCARD_E_NO_MEMORY;
@@ -3218,6 +3352,13 @@ LONG smartcard_unpack_control_call(wStream* s, Control_Call* call)
 
 	Stream_Read_UINT32(s, call->dwControlCode);  /* dwControlCode (4 bytes) */
 	const UINT32 cbInBufferSize = Stream_Get_UINT32(s); /* cbInBufferSize (4 bytes) */
+	if (cbInBufferSize > 66560)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.20 Control_Call cbInBufferSize (%" PRIu32 ") > 66560",
+		           cbInBufferSize);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index,
 	                                &pvInBufferNdrPtr)) /* pvInBufferNdrPtr (4 bytes) */
 		return ERROR_INVALID_DATA;
@@ -3262,6 +3403,13 @@ LONG smartcard_pack_control_return(wStream* s, const Control_Return* ret)
 
 	if (!Stream_EnsureRemainingCapacity(s, 4))
 		return SCARD_F_INTERNAL_ERROR;
+
+	if (cbDataLen > 66560)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.6 Control_Return cbOutBufferSize(%" PRIu32 ") > 66560",
+		           cbDataLen);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	Stream_Write_UINT32(s, cbDataLen); /* cbOutBufferSize (4 bytes) */
 	if (!smartcard_ndr_pointer_write(s, &index, cbDataLen))
@@ -3311,6 +3459,12 @@ LONG smartcard_unpack_transmit_call(wStream* s, Transmit_Call* call)
 		return ERROR_INVALID_DATA;
 
 	const UINT32 cbSendLength = Stream_Get_UINT32(s); /* cbSendLength (4 bytes) */
+	if (cbSendLength > 66560)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.19 Transmit_Call cbSendLength (%" PRIu32 ") > 66560",
+		           cbSendLength);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 	if (!smartcard_ndr_pointer_read(log, s, &index,
 	                                &pbSendBufferNdrPtr)) /* pbSendBufferNdrPtr (4 bytes) */
 		return ERROR_INVALID_DATA;
@@ -3510,6 +3664,14 @@ LONG smartcard_pack_transmit_return(wStream* s, const Transmit_Return* ret)
 		return SCARD_E_NO_MEMORY;
 	if (!Stream_EnsureRemainingCapacity(s, 4))
 		return SCARD_E_NO_MEMORY;
+
+	if (cbRecvLength > 66560)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.11 Transmit_Return cbRecvLength(%" PRIu32 ") > 66560",
+		           cbRecvLength);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	Stream_Write_UINT32(s, cbRecvLength); /* cbRecvLength (4 bytes) */
 	if (!smartcard_ndr_pointer_write(s, &index, cbRecvLength))
 		return SCARD_E_NO_MEMORY;
@@ -3519,7 +3681,7 @@ LONG smartcard_pack_transmit_return(wStream* s, const Transmit_Return* ret)
 		UINT32 cbExtraBytes = (UINT32)(ret->pioRecvPci->cbPciLength - sizeof(SCARD_IO_REQUEST));
 		BYTE* pbExtraBytes = &((BYTE*)ret->pioRecvPci)[sizeof(SCARD_IO_REQUEST)];
 
-		if (!Stream_EnsureRemainingCapacity(s, cbExtraBytes + 16))
+		if (!Stream_EnsureRemainingCapacity(s, 8ull))
 		{
 			WLog_Print(log, WLOG_ERROR, "Stream_EnsureRemainingCapacity failed!");
 			return SCARD_F_INTERNAL_ERROR;
@@ -3561,9 +3723,22 @@ LONG smartcard_unpack_locate_cards_by_atr_a_call(wStream* s, LocateCardsByATRA_C
 		return STATUS_BUFFER_TOO_SMALL;
 
 	Stream_Read_UINT32(s, call->cAtrs);
+	if (call->cAtrs > 1000)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.23 LocateCardsByATRA_Call cAtrs(%" PRIu32 ") > 1000",
+		           call->cAtrs);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index, &rgAtrMasksNdrPtr))
 		return ERROR_INVALID_DATA;
 	const UINT32 cReaders = Stream_Get_UINT32(s); /* cReaders (4 bytes) */
+	if (cReaders > 10)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.23 LocateCardsByATRA_Call cReaders(%" PRIu32 ") > 10",
+		           cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 	if (!smartcard_ndr_pointer_read(log, s, &index, &rgReaderStatesNdrPtr))
 		return ERROR_INVALID_DATA;
 
@@ -3701,10 +3876,23 @@ LONG smartcard_unpack_locate_cards_a_call(wStream* s, LocateCardsA_Call* call)
 		return STATUS_BUFFER_TOO_SMALL;
 
 	const UINT32 cBytes = Stream_Get_UINT32(s);
+	if (call->cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.9 LocateCardsA_Call cBytes(%" PRIu32 ") > 65536",
+		           call->cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index, &sz1NdrPtr))
 		return ERROR_INVALID_DATA;
 
 	const UINT32 cReaders = Stream_Get_UINT32(s);
+	if (cReaders > 10)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.9 LocateCardsA_Call cReaders(%" PRIu32 ") > 10",
+		           cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 	if (!smartcard_ndr_pointer_read(log, s, &index, &sz2NdrPtr))
 		return ERROR_INVALID_DATA;
 
@@ -3750,10 +3938,24 @@ LONG smartcard_unpack_locate_cards_w_call(wStream* s, LocateCardsW_Call* call)
 		return STATUS_BUFFER_TOO_SMALL;
 
 	const UINT32 cBytes = Stream_Get_UINT32(s);
+	if (call->cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.10 LocateCardsW_Call cBytes(%" PRIu32 ") > 65536",
+		           call->cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index, &sz1NdrPtr))
 		return ERROR_INVALID_DATA;
 
 	const UINT32 cReaders = Stream_Get_UINT32(s);
+	if (cReaders > 10)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.10 LocateCardsW_Call cReaders(%" PRIu32 ") > 10",
+		           cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index, &sz2NdrPtr))
 		return ERROR_INVALID_DATA;
 
@@ -3801,6 +4003,12 @@ LONG smartcard_unpack_set_attrib_call(wStream* s, SetAttrib_Call* call)
 		return STATUS_BUFFER_TOO_SMALL;
 	Stream_Read_UINT32(s, call->dwAttrId);
 	Stream_Read_UINT32(s, call->cbAttrLen);
+	if (call->cbAttrLen > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.22 SetAttrib_Call call->cbAttrLen (%" PRIu32 ") > 65536",
+		           call->cbAttrLen);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &ndrPtr))
 		return ERROR_INVALID_DATA;
@@ -3890,10 +4098,23 @@ LONG smartcard_unpack_locate_cards_by_atr_w_call(wStream* s, LocateCardsByATRW_C
 		return STATUS_BUFFER_TOO_SMALL;
 
 	Stream_Read_UINT32(s, call->cAtrs);
+	if (call->cAtrs > 1000)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.24 LocateCardsByATRW_Call cAtrs(%" PRIu32 ") > 1000",
+		           call->cAtrs);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	if (!smartcard_ndr_pointer_read(log, s, &index, &rgAtrMasksNdrPtr))
 		return ERROR_INVALID_DATA;
 
 	const UINT32 cReaders = Stream_Get_UINT32(s); /* cReaders (4 bytes) */
+	if (cReaders > 10)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.24 LocateCardsByATRW_Call cReaders(%" PRIu32 ") > 10",
+		           cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 	if (!smartcard_ndr_pointer_read(log, s, &index, &rgReaderStatesNdrPtr))
 		return ERROR_INVALID_DATA;
 
@@ -4057,6 +4278,12 @@ LONG smartcard_unpack_write_cache_a_call(wStream* s, WriteCacheA_Call* call)
 
 	Stream_Read_UINT32(s, call->Common.FreshnessCounter);
 	const UINT32 cbDataLen = Stream_Get_UINT32(s);
+	if (cbDataLen > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.1.10 WriteCache_Common cbDataLen(%" PRIu32 ") > 65536",
+		           cbDataLen);
+		return ERROR_INVALID_DATA;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &pbDataNdrPtr))
 		return ERROR_INVALID_DATA;
@@ -4120,6 +4347,13 @@ LONG smartcard_unpack_write_cache_w_call(wStream* s, WriteCacheW_Call* call)
 		return STATUS_BUFFER_TOO_SMALL;
 	Stream_Read_UINT32(s, call->Common.FreshnessCounter);
 	const UINT32 cbDataLen = Stream_Get_UINT32(s);
+
+	if (cbDataLen > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.1.10 WriteCache_Common cbDataLen(%" PRIu32 ") > 65536",
+		           cbDataLen);
+		return ERROR_INVALID_DATA;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &pbDataNdrPtr))
 		return ERROR_INVALID_DATA;
@@ -4261,6 +4495,15 @@ LONG smartcard_pack_locate_cards_return(wStream* s, const LocateCards_Return* re
 		return SCARD_F_INTERNAL_ERROR;
 	}
 
+	if (ret->cReaders > 10)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "2.2.3.5 LocateCards_Return and GetStatusChange_Return cReaders(%" PRIu32
+		           ") > 10",
+		           ret->cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	Stream_Write_UINT32(s, cbDataLen); /* cBytes (4 cbDataLen) */
 	if (!smartcard_ndr_pointer_write(s, &index, cbDataLen))
 		return SCARD_E_NO_MEMORY;
@@ -4340,6 +4583,13 @@ LONG smartcard_pack_read_cache_return(wStream* s, const ReadCache_Return* ret)
 		return SCARD_F_INTERNAL_ERROR;
 	}
 
+	if (cbDataLen > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.1 ReadCache_Return cbDataLen (%" PRIu32 ") > 65536",
+		           cbDataLen);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	Stream_Write_UINT32(s, cbDataLen); /* cBytes (4 cbDataLen) */
 	if (!smartcard_ndr_pointer_write(s, &index, cbDataLen))
 		return SCARD_E_NO_MEMORY;
@@ -4381,6 +4631,13 @@ LONG smartcard_pack_list_readers_call(wStream* s, const ListReaders_Call* call, 
 		return SCARD_E_NO_MEMORY;
 
 	Stream_Write_UINT32(s, call->cBytes);
+	if (call->cBytes > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.4 ListReaders_Call cBytes(%" PRIu32 ") > 65536",
+		           call->cBytes);
+		return SCARD_E_INVALID_PARAMETER;
+	}
+
 	if (!smartcard_ndr_pointer_write(s, &index, call->cBytes))
 		return SCARD_E_NO_MEMORY;
 
@@ -4404,8 +4661,9 @@ LONG smartcard_pack_list_readers_call(wStream* s, const ListReaders_Call* call, 
 	return SCARD_S_SUCCESS;
 }
 
-static LONG smartcard_pack_reader_state_a(wStream* s, const LPSCARD_READERSTATEA rgReaderStates,
-                                          UINT32 cReaders, UINT32* ptrIndex)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_pack_reader_state_a(wLog* log, wStream* s, const LPSCARD_READERSTATEA rgReaderStates,
+                              UINT32 cReaders, UINT32* ptrIndex)
 {
 	WINPR_ASSERT(rgReaderStates || (cReaders == 0));
 
@@ -4427,6 +4685,12 @@ static LONG smartcard_pack_reader_state_a(wStream* s, const LPSCARD_READERSTATEA
 
 		Stream_Write_UINT32(s, state->dwCurrentState);
 		Stream_Write_UINT32(s, state->dwEventState);
+		if (state->cbAtr > 36)
+		{
+			WLog_Print(log, WLOG_WARN, "2.2.2.12 GetStatusChangeW_Call cbAtr(%" PRIu32 ") > 36",
+			           state->cbAtr);
+			return SCARD_E_INVALID_PARAMETER;
+		}
 		Stream_Write_UINT32(s, state->cbAtr);
 		Stream_Write(s, state->rgbAtr, 36);
 	}
@@ -4447,8 +4711,9 @@ static LONG smartcard_pack_reader_state_a(wStream* s, const LPSCARD_READERSTATEA
 	return SCARD_S_SUCCESS;
 }
 
-static LONG smartcard_pack_reader_state_w(wStream* s, const LPSCARD_READERSTATEW rgReaderStates,
-                                          UINT32 cReaders, UINT32* ptrIndex)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_pack_reader_state_w(wLog* log, wStream* s, const LPSCARD_READERSTATEW rgReaderStates,
+                              UINT32 cReaders, UINT32* ptrIndex)
 {
 	WINPR_ASSERT(rgReaderStates || (cReaders == 0));
 
@@ -4470,6 +4735,12 @@ static LONG smartcard_pack_reader_state_w(wStream* s, const LPSCARD_READERSTATEW
 
 		Stream_Write_UINT32(s, state->dwCurrentState);
 		Stream_Write_UINT32(s, state->dwEventState);
+		if (state->cbAtr > 36)
+		{
+			WLog_Print(log, WLOG_WARN, "2.2.2.12 GetStatusChangeW_Call cbAtr(%" PRIu32 ") > 36",
+			           state->cbAtr);
+			return SCARD_E_INVALID_PARAMETER;
+		}
 		Stream_Write_UINT32(s, state->cbAtr);
 		Stream_Write(s, state->rgbAtr, 36);
 	}
@@ -4507,7 +4778,12 @@ LONG smartcard_pack_get_status_change_a_call(wStream* s, const GetStatusChangeA_
 
 	Stream_Write_UINT32(s, call->dwTimeOut);
 	Stream_Write_UINT32(s, call->cReaders);
-
+	if (call->cReaders > 11)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.11 GetStatusChangeA_Call cReaders (%" PRIu32 ") > 11",
+		           call->cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 	if (!smartcard_ndr_pointer_write(s, &index, call->cReaders))
 		return SCARD_E_NO_MEMORY;
 
@@ -4517,7 +4793,8 @@ LONG smartcard_pack_get_status_change_a_call(wStream* s, const GetStatusChangeA_
 
 	if (call->cReaders > 0)
 	{
-		status = smartcard_pack_reader_state_a(s, call->rgReaderStates, call->cReaders, &index);
+		status =
+		    smartcard_pack_reader_state_a(log, s, call->rgReaderStates, call->cReaders, &index);
 		if (status != SCARD_S_SUCCESS)
 			return status;
 	}
@@ -4542,6 +4819,12 @@ LONG smartcard_pack_get_status_change_w_call(wStream* s, const GetStatusChangeW_
 
 	Stream_Write_UINT32(s, call->dwTimeOut);
 	Stream_Write_UINT32(s, call->cReaders);
+	if (call->cReaders > 11)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.2.12 GetStatusChangeW_Call cReaders (%" PRIu32 ") > 11",
+		           call->cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	if (!smartcard_ndr_pointer_write(s, &index, call->cReaders))
 		return SCARD_E_NO_MEMORY;
@@ -4552,7 +4835,8 @@ LONG smartcard_pack_get_status_change_w_call(wStream* s, const GetStatusChangeW_
 
 	if (call->cReaders > 0)
 	{
-		status = smartcard_pack_reader_state_w(s, call->rgReaderStates, call->cReaders, &index);
+		status =
+		    smartcard_pack_reader_state_w(log, s, call->rgReaderStates, call->cReaders, &index);
 		if (status != SCARD_S_SUCCESS)
 			return status;
 	}
@@ -4859,6 +5143,14 @@ LONG smartcard_unpack_get_status_change_return(wStream* s, GetStatusChange_Retur
 		return STATUS_BUFFER_TOO_SMALL;
 
 	Stream_Read_UINT32(s, ret->cReaders);
+	if (ret->cReaders > 10)
+	{
+		WLog_Print(log, WLOG_ERROR,
+		           "2.2.3.5 LocateCards_Return and GetStatusChange_Return cReaders(%" PRIu32
+		           ") > 10",
+		           ret->cReaders);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &ndrPtr))
 		return ERROR_INVALID_DATA;
@@ -4952,6 +5244,12 @@ LONG smartcard_unpack_transmit_return(wStream* s, Transmit_Return* ret)
 		return STATUS_BUFFER_TOO_SMALL;
 
 	const UINT32 cbRecvLength = Stream_Get_UINT32(s);
+	if (cbRecvLength > 66560)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.11 Transmit_Return cbRecvLength(%" PRIu32 ") > 66560",
+		           cbRecvLength);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &recvBufferNdrPtr))
 		return ERROR_INVALID_DATA;
@@ -5036,6 +5334,12 @@ LONG smartcard_unpack_get_attrib_return(wStream* s, GetAttrib_Return* ret)
 		return STATUS_BUFFER_TOO_SMALL;
 
 	const UINT32 cbAttrLen = Stream_Get_UINT32(s);
+	if (cbAttrLen > 65536)
+	{
+		WLog_Print(log, WLOG_ERROR, "2.2.3.12 GetAttrib_Return cbAttrLen(%" PRIu32 ") > 65536",
+		           cbAttrLen);
+		return SCARD_E_INVALID_PARAMETER;
+	}
 
 	if (!smartcard_ndr_pointer_read(log, s, &index, &pbAttrPtr))
 		return ERROR_INVALID_DATA;

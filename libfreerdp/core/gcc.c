@@ -955,7 +955,7 @@ BOOL gcc_write_user_data_header(wStream* s, UINT16 type, UINT16 length)
 {
 
 	WINPR_ASSERT(s);
-	if (!Stream_EnsureRemainingCapacity(s, 4 + length))
+	if (!Stream_EnsureRemainingCapacity(s, 4ull + length))
 		return FALSE;
 	Stream_Write_UINT16(s, type);   /* type */
 	Stream_Write_UINT16(s, length); /* length */
@@ -1211,6 +1211,7 @@ BOOL gcc_read_client_core_data(wStream* s, rdpMcs* mcs)
 	Stream_Read_UINT32(s, settings->KeyboardType);        /* KeyboardType (4 bytes) */
 	Stream_Read_UINT32(s, settings->KeyboardSubType);     /* KeyboardSubType (4 bytes) */
 	Stream_Read_UINT32(s, settings->KeyboardFunctionKey); /* KeyboardFunctionKey (4 bytes) */
+	freerdp_settings_sanitize_keyboard_type(mcs->log, settings, "TS_UD_CS_CORE");
 	Stream_Seek(s, 64);                                   /* imeFileName (64 bytes) */
 
 	/**

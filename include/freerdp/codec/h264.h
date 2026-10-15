@@ -71,6 +71,7 @@ extern "C"
 		H264_CONTEXT_OPTION_USAGETYPE, /** @since version 3.6.0 */
 		H264_CONTEXT_OPTION_HW_ACCEL,  /** set to request hw accel, get to check if hw accel is on,
 		                                  @since version 3.11.0 */
+		H264_CONTEXT_OPTION_VAAPI_OUTPUT, /** read-only: VAAPI surfaces available to the X11 path */
 	} H264_CONTEXT_OPTION;
 
 	FREERDP_API void free_h264_metablock(RDPGFX_H264_METABLOCK* meta);

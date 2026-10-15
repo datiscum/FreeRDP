@@ -352,6 +352,39 @@ static BOOL check_string_is_host_or_ip(WINPR_ATTR_UNUSED const X509* x509,
 }
 
 WINPR_ATTR_NODISCARD
+static BOOL check_string_is_dns_name(const X509* x509, const unsigned char* ustr, size_t length)
+{
+	/* RFC 6125 wildcard DNS names (e.g. *.example.com): validate the part after
+	 * the leading label; tls_match_hostname applies the single-label rule.
+	 * Like OpenSSL, require at least two non-empty labels after the wildcard,
+	 * so *.com, *..com and *.com. are rejected. */
+	if ((length > 2) && (ustr[0] == '*') && (ustr[1] == '.'))
+	{
+		const unsigned char* suffix = &ustr[2];
+		const size_t suffixLength = length - 2;
+		size_t dots = 0;
+
+		if ((suffix[0] == '.') || (suffix[suffixLength - 1] == '.'))
+			return FALSE;
+
+		for (size_t x = 1; x < suffixLength; x++)
+		{
+			if (suffix[x] == '.')
+			{
+				if (suffix[x - 1] == '.')
+					return FALSE;
+				dots++;
+			}
+		}
+
+		if (dots == 0)
+			return FALSE;
+		return check_string_is_host_or_ip(x509, suffix, suffixLength);
+	}
+	return check_string_is_host_or_ip(x509, ustr, length);
+}
+
+WINPR_ATTR_NODISCARD
 static BOOL check_string_is_host_or_ip_or_email(WINPR_ATTR_UNUSED const X509* x509,
                                                 const unsigned char* ustr, size_t length)
 {
@@ -434,7 +467,7 @@ extract_string_generic(const X509* x509, GENERAL_NAME* name, void* data, int ind
 WINPR_ATTR_NODISCARD
 static int extract_string(const X509* x509, GENERAL_NAME* name, void* data, int index, int count)
 {
-	return extract_string_generic(x509, name, data, index, count, check_string_is_host_or_ip);
+	return extract_string_generic(x509, name, data, index, count, check_string_is_dns_name);
 }
 
 static int extract_email(const X509* x509, GENERAL_NAME* name, void* data, int index, int count)
@@ -664,10 +697,12 @@ void x509_utils_dns_names_free(size_t count, size_t* lengths, char** dns_names)
 	}
 }
 
-char** x509_utils_get_dns_names(const X509* xcert, size_t* count, size_t** lengths)
+WINPR_ATTR_NODISCARD
+static char** x509_utils_get_names(const X509* xcert, int general_name_type, size_t* count,
+                                   size_t** lengths)
 {
 	string_list list = string_list_initialize();
-	map_subject_alt_name(xcert, GEN_DNS, extract_string, &list);
+	map_subject_alt_name(xcert, general_name_type, extract_string, &list);
 	(*count) = list.count;
 
 	if (list.count <= 0)
@@ -699,6 +734,16 @@ char** x509_utils_get_dns_names(const X509* xcert, size_t* count, size_t** lengt
 
 	string_list_free(&list);
 	return result;
+}
+
+char** x509_utils_get_dns_names(const X509* xcert, size_t* count, size_t** pplengths)
+{
+	return x509_utils_get_names(xcert, GEN_DNS, count, pplengths);
+}
+
+char** x509_utils_get_ip_names(const X509* xcert, size_t* count, size_t** pplengths)
+{
+	return x509_utils_get_names(xcert, GEN_IPADD, count, pplengths);
 }
 
 char* x509_utils_get_issuer(const X509* xcert)
@@ -744,7 +789,12 @@ BOOL x509_utils_check_eku(const X509* xcert, int nid)
 	if (!oid_stack)
 		return FALSE;
 
+	/* sk_ASN1_OBJECT_set_cmp_func does some function pointer casting that produces a warning. We
+	 * can not fix upstream, so silence it here. */
+	WINPR_PRAGMA_DIAG_PUSH
+	WINPR_PRAGMA_DIAG_IGNORED_CAST_FUNCTION_TYPE
 	sk_ASN1_OBJECT_set_cmp_func(oid_stack, asn1_object_cmp);
+	WINPR_PRAGMA_DIAG_POP
 	if (sk_ASN1_OBJECT_find(oid_stack, oid) >= 0)
 		ret = TRUE;
 
@@ -976,8 +1026,7 @@ char* x509_utils_get_common_name(const X509* xcert, size_t* plength)
 		return nullptr;
 
 	char* common_name = nullptr;
-	if (check_string_is_host_or_ip(xcert, common_name_raw,
-	                               WINPR_ASSERTING_INT_CAST(size_t, length)))
+	if (check_string_is_dns_name(xcert, common_name_raw, WINPR_ASSERTING_INT_CAST(size_t, length)))
 	{
 		if (plength)
 			*plength = (size_t)length;
@@ -1111,4 +1160,9 @@ char* x509_utils_bio_read(BIO* bio, size_t* plen)
 fail:
 	free(buffer);
 	return nullptr;
+}
+
+void x509_utils_ip_names_free(size_t count, size_t* lengths, char** dns_names)
+{
+	x509_utils_dns_names_free(count, lengths, dns_names);
 }

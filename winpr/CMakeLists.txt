@@ -149,6 +149,16 @@ if(WITHOUT_WINPR_3x_DEPRECATED)
   add_compile_definitions(WITHOUT_WINPR_3x_DEPRECATED)
 endif()
 
+option(
+  DISABLE_SUPPORTED_ARCH_CHECKS
+  "[experimental,dangerous,unsupported] Build for unknown systems or such missing essential features (unaligned memory access, ...)"
+  OFF
+)
+if(DISABLE_SUPPORTED_ARCH_CHECKS)
+  include(WarnExperimental)
+  warn_experimental("Skip PlatformChecks" "-DDISABLE_SUPPORTED_ARCH_CHECKS=OFF")
+endif()
+
 # Include cmake modules
 include(CheckIncludeFiles)
 include(CheckLibraryExists)
@@ -199,6 +209,8 @@ else()
   endif()
 endif()
 
+add_compile_definitions(WINPR_RESOURCE_ROOT="${WINPR_RESOURCE_ROOT}")
+
 include(CheckTypeSize)
 set(CMAKE_EXTRA_INCLUDE_FILES "sys/types.h")
 check_type_size(ssize_t SSIZE_T)
@@ -209,31 +221,113 @@ check_type_size(SSIZE_T WIN_SSIZE_T)
 set(WINPR_HAVE_SSIZE_T ${HAVE_SSIZE_T})
 set(WINPR_HAVE_WIN_SSIZE_T ${HAVE_WIN_SSIZE_T})
 
-check_symbol_exists(strnstr string.h WINPR_HAVE_STRNSTR)
-check_symbol_exists(strndup string.h WINPR_HAVE_STRNDUP)
+if(APPLE)
+  set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} -Werror=unguarded-availability-new")
+endif()
 
-# pipe2()/accept4() are GNU/BSD extensions; glibc only declares them when _GNU_SOURCE is visible,
-# which this project does not set globally (see cmake/PlatformDefaults.cmake) - request it just
-# for these checks, matching the _GNU_SOURCE the actual call sites (pipe.c) define for themselves.
-set(CMAKE_REQUIRED_DEFINITIONS_SAVE ${CMAKE_REQUIRED_DEFINITIONS})
-set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE")
-check_symbol_exists(pipe2 unistd.h WINPR_HAVE_PIPE2)
-check_symbol_exists(accept4 sys/socket.h WINPR_HAVE_ACCEPT4)
-set(CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS_SAVE})
-check_include_files(unistd.h WINPR_HAVE_UNISTD_H)
-check_include_files(execinfo.h WINPR_HAVE_EXECINFO_HEADER)
-if(WINPR_HAVE_EXECINFO_HEADER)
-  check_symbol_exists(backtrace execinfo.h WINPR_HAVE_EXECINFO_BACKTRACE)
-  check_symbol_exists(backtrace_symbols execinfo.h WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS)
-  check_symbol_exists(backtrace_symbols_fd execinfo.h WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS_FD)
+if(CMAKE_VERSION VERSION_LESS "3.19")
+  check_symbol_exists(strnstr string.h WINPR_HAVE_STRNSTR)
+  check_symbol_exists(strndup string.h WINPR_HAVE_STRNDUP)
 
-  # Some implementations (e.g. Android NDK API < 33) provide execinfo.h but do not define
-  # the backtrace functions. Disable detection for these cases
-  if(WINPR_HAVE_EXECINFO_BACKTRACE AND WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS
-     AND WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS_FD
-  )
-    set(WINPR_HAVE_EXECINFO_H ON)
+  # pipe2()/accept4() are GNU/BSD extensions; glibc only declares them when _GNU_SOURCE is visible,
+  # which this project does not set globally (see cmake/PlatformDefaults.cmake) - request it just
+  # for these checks, matching the _GNU_SOURCE the actual call sites (pipe.c) define for themselves.
+  set(CMAKE_REQUIRED_DEFINITIONS_SAVE ${CMAKE_REQUIRED_DEFINITIONS})
+  set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE")
+  check_symbol_exists(pipe2 unistd.h WINPR_HAVE_PIPE2)
+  check_symbol_exists(accept4 sys/socket.h WINPR_HAVE_ACCEPT4)
+  set(CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS_SAVE})
+  check_include_files(unistd.h WINPR_HAVE_UNISTD_H)
+  check_include_files(execinfo.h WINPR_HAVE_EXECINFO_HEADER)
+  if(WINPR_HAVE_EXECINFO_HEADER)
+    check_symbol_exists(backtrace execinfo.h WINPR_HAVE_EXECINFO_BACKTRACE)
+    check_symbol_exists(backtrace_symbols execinfo.h WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS)
+    check_symbol_exists(backtrace_symbols_fd execinfo.h WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS_FD)
+
+    # Some implementations (e.g. Android NDK API < 33) provide execinfo.h but do not define
+    # the backtrace functions. Disable detection for these cases
+    if(WINPR_HAVE_EXECINFO_BACKTRACE AND WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS
+       AND WINPR_HAVE_EXECINFO_BACKTRACE_SYMBOLS_FD
+    )
+      set(WINPR_HAVE_EXECINFO_H ON)
+    endif()
   endif()
+
+else()
+
+  include(CheckSourceCompiles)
+  check_source_compiles(
+    C
+    [[
+    #include <string.h>
+
+    int main(void) {
+        strnstr("foo", "o", 3);
+        return 0;
+    }
+    ]]
+    WINPR_HAVE_STRNSTR
+  )
+  check_source_compiles(
+    C
+    [[
+    #include <string.h>
+
+    int main(void) {
+    strndup("foo", 3);
+    return 0;
+    }
+    ]]
+    WINPR_HAVE_STRNDUP
+  )
+
+  # pipe2()/accept4() are GNU/BSD extensions; glibc only declares them when _GNU_SOURCE is visible,
+  # which this project does not set globally (see cmake/PlatformDefaults.cmake) - request it just
+  # for these checks, matching the _GNU_SOURCE the actual call sites (pipe.c) define for themselves.
+  set(CMAKE_REQUIRED_DEFINITIONS_SAVE ${CMAKE_REQUIRED_DEFINITIONS})
+  set(CMAKE_REQUIRED_DEFINITIONS "-D_GNU_SOURCE")
+  check_source_compiles(
+    C
+    [[
+#include <unistd.h>
+
+int main(void) {
+int pipes[2] = {0};
+return pipe2(pipes, 0);
+}
+]]
+    WINPR_HAVE_PIPE2
+  )
+
+  check_source_compiles(
+    C
+    [[
+#include <sys/socket.h>
+
+int main(void) {
+int sockfd = -1;
+struct sockaddr addr = {0};
+socklen_t addrlen = 0;
+       return accept4(sockfd, &addr, &addrlen, 0);
+}
+]]
+    WINPR_HAVE_ACCEPT4
+  )
+  set(CMAKE_REQUIRED_DEFINITIONS ${CMAKE_REQUIRED_DEFINITIONS_SAVE})
+  check_include_files(unistd.h WINPR_HAVE_UNISTD_H)
+  check_source_compiles(
+    C
+    [[
+        #include <execinfo.h>
+
+        int main(void) {
+            int rc = backtrace(NULL, 23);
+            backtrace_symbols(NULL, 23);
+            backtrace_symbols_fd(NULL, 23, 2);
+        }
+        ]]
+    WINPR_HAVE_EXECINFO_H
+  )
 endif()
 
 check_include_files(stdint.h WINPR_HAVE_STDINT_H)
@@ -381,7 +475,11 @@ list(JOIN WINPR_PC_REQUIRES_PRIVATE " " WINPR_PC_REQUIRES_PRIVATE)
 
 set(WINPR_PC_LIBRARY_PRIVATE "")
 include(PkgConfigAddThreads)
-pkg_config_add_threads(WINPR_PC_LIBRARY_PRIVATE ${CMAKE_DL_LIBS} rt m)
+if(OPENBSD)
+  pkg_config_add_threads(WINPR_PC_LIBRARY_PRIVATE m)
+else()
+  pkg_config_add_threads(WINPR_PC_LIBRARY_PRIVATE ${CMAKE_DL_LIBS} rt m)
+endif()
 
 # Do not set Requires.Private if not a static build
 if(BUILD_SHARED_LIBS)
@@ -396,6 +494,61 @@ endif()
 if(BUILD_TESTING_INTERNAL OR BUILD_TESTING)
   add_subdirectory(test)
 endif()
+
+set(WINPR_BUILD_CONFIG_DEBUG_FILTER
+    WITH_DEBUG_THREADS
+    WITH_DEBUG_EVENTS
+    WITH_DEBUG_SYMBOLS
+    WITH_DEBUG_MUTEX
+    WITH_DEBUG_NTLM
+    WITH_DEBUG_NLA
+    WITH_DEBUG_SCHANNEL
+    WITH_DEBUG_UTILS_CMDLINE_DUMP
+    WITH_DEBUG_STREAMPOOL
+)
+set(WINPR_BUILD_CONFIG_FILTER
+    ${WINPR_BUILD_CONFIG_DEBUG_FILTER}
+    WITH_LIBRESSL
+    WITH_WINPR_TOOLS
+    WITH_WINPR_DEPRECATED
+    WITHOUT_WINPR_3x_DEPRECATED
+    WITH_NATIVE_SSPI
+    WITH_SMARTCARD_INSPECT
+    WITH_INTERNAL_RC4
+    WITH_INTERNAL_MD4
+    WITH_INTERNAL_MD5
+    WITH_UNICODE_BUILTIN
+    WINPR_USE_LEGACY_RESOURCE_DIR
+    WINPR_USE_VENDOR_PRODUCT_CONFIG_DIR
+    SSPI_DLL
+    WITH_POLL
+    WITH_PKCS11
+    WITH_URIPARSER
+    WITH_SMARTCARD_PCSC
+    WITH_KRB5
+    WITH_TIMEZONE_COMPILED
+    WITH_TIMEZONE_ICU
+    WITH_TIMEZONE_UPDATER
+    WITH_LODEPNG
+    WINPR_UTILS_IMAGE_DIBv5
+    WINPR_UTILS_IMAGE_PNG
+    WINPR_UTILS_IMAGE_WEBP
+    WINPR_UTILS_IMAGE_JPEG
+    WITH_SYSTEMD
+    USE_EXECINFO
+    USE_UNWIND
+    WITH_WINPR_TOOLS_CLI
+)
+
+set(WINPR_BUILD_CONFIG_LIST "")
+get_cmake_property(res VARIABLES)
+foreach(var ${res})
+  list(FIND WINPR_BUILD_CONFIG_FILTER ${var} LOOP_VAR_FOUND)
+  if(LOOP_VAR_FOUND GREATER -1)
+    list(APPEND WINPR_BUILD_CONFIG_LIST "${var}=${${var}}")
+  endif()
+endforeach()
+string(REPLACE ";" " " WINPR_BUILD_CONFIG "${WINPR_BUILD_CONFIG_LIST}")
 
 add_subdirectory(include)
 

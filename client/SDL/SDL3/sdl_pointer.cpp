@@ -51,7 +51,7 @@ struct sdlPointer
 
 		size = 4ull * pointer.width * pointer.height;
 		winpr_aligned_free(data);
-		data = static_cast<BYTE*>(winpr_aligned_malloc(size, 16));
+		data = static_cast<BYTE*>(winpr_aligned_calloc(1, size, 16));
 
 		if (!data)
 			return false;
@@ -196,10 +196,14 @@ bool sdl_Pointer_Set_Process(SdlContext* sdl)
 
 	const auto w = static_cast<int>(pos.w);
 	const auto h = static_cast<int>(pos.h);
+	if ((w <= 0) || (h <= 0))
+		return true;
+
 	std::unique_ptr<SDL_Surface, void (*)(SDL_Surface*)> normal{
 		SDL_CreateSurface(w, h, ptr->image->format), SDL_DestroySurface
 	};
-	assert(normal);
+	if (!normal)
+		return true;
 	if (!SDL_BlitSurfaceScaled(ptr->image, nullptr, normal.get(), nullptr,
 	                           SDL_ScaleMode::SDL_SCALEMODE_LINEAR))
 	{
@@ -297,8 +301,8 @@ rdpPointer* sdl_Pointer_Copy(const rdpPointer* pointer)
 	copy->pointer.xorBpp = pointer->xorBpp;
 	if (ptr->size > 0)
 	{
-		copy->data = static_cast<BYTE*>(winpr_aligned_malloc(ptr->size, 32));
-		if (!copy)
+		copy->data = static_cast<BYTE*>(winpr_aligned_calloc(1, ptr->size, 32));
+		if (!copy->data)
 		{
 			free(copy);
 			return nullptr;

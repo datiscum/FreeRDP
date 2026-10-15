@@ -16,9 +16,7 @@ static void free_string(char** current, BOOL cleanup)
 {
 	if (cleanup)
 	{
-		if (*current)
-			memset(*current, 0, strlen(*current));
-		free(*current);
+		winpr_zfree(*current);
 		(*current) = nullptr;
 	}
 }
@@ -1784,6 +1782,9 @@ UINT32 freerdp_settings_get_uint32(WINPR_ATTR_UNUSED const rdpSettings* settings
 		case FreeRDP_GatewayPort:
 			return settings->GatewayPort;
 
+		case FreeRDP_GatewayResponseTimeout:
+			return settings->GatewayResponseTimeout;
+
 		case FreeRDP_GatewayUsageMethod:
 			return settings->GatewayUsageMethod;
 
@@ -2239,6 +2240,10 @@ BOOL freerdp_settings_set_uint32(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 		case FreeRDP_GatewayPort:
 			settings->GatewayPort = cnv.c;
+			break;
+
+		case FreeRDP_GatewayResponseTimeout:
+			settings->GatewayResponseTimeout = cnv.c;
 			break;
 
 		case FreeRDP_GatewayUsageMethod:
@@ -2751,6 +2756,9 @@ const char* freerdp_settings_get_string(WINPR_ATTR_UNUSED const rdpSettings* set
 
 	switch (id)
 	{
+		case FreeRDP_AadAuthHelper:
+			return settings->AadAuthHelper;
+
 		case FreeRDP_AadServerHostname:
 			return settings->AadServerHostname;
 
@@ -3092,6 +3100,9 @@ char* freerdp_settings_get_string_writable(rdpSettings* settings, FreeRDP_Settin
 
 	switch (id)
 	{
+		case FreeRDP_AadAuthHelper:
+			return settings->AadAuthHelper;
+
 		case FreeRDP_AadServerHostname:
 			return settings->AadServerHostname;
 
@@ -3445,6 +3456,9 @@ BOOL freerdp_settings_set_string_(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 	switch (id)
 	{
+		case FreeRDP_AadAuthHelper:
+			return update_string_(&settings->AadAuthHelper, cnv.c, len);
+
 		case FreeRDP_AadServerHostname:
 			return update_string_(&settings->AadServerHostname, cnv.c, len);
 
@@ -3812,6 +3826,9 @@ BOOL freerdp_settings_set_string_copy_(WINPR_ATTR_UNUSED rdpSettings* settings,
 
 	switch (id)
 	{
+		case FreeRDP_AadAuthHelper:
+			return update_string_copy_(&settings->AadAuthHelper, cnv.cc, len, cleanup);
+
 		case FreeRDP_AadServerHostname:
 			return update_string_copy_(&settings->AadServerHostname, cnv.cc, len, cleanup);
 

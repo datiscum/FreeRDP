@@ -136,6 +136,10 @@ bool sdl_push_user_event(Uint32 type, ...)
 			event->data1 = va_arg(ap, void*);
 			event->code = va_arg(ap, int);
 			break;
+		case SDL_EVENT_USER_RAIL_MOVE:
+			event->data1 = reinterpret_cast<void*>(static_cast<uintptr_t>(va_arg(ap, UINT32)));
+			event->code = va_arg(ap, int); /* RAIL_WMSZ_* move/resize type */
+			break;
 		case SDL_EVENT_USER_WINDOW_MINIMIZE:
 		case SDL_EVENT_USER_QUIT:
 		case SDL_EVENT_USER_POINTER_NULL:
@@ -266,6 +270,20 @@ namespace sdl::utils
 			EV_CASE_STR(SDL_EVENT_DISPLAY_REMOVED);
 			EV_CASE_STR(SDL_EVENT_DISPLAY_MOVED);
 			EV_CASE_STR(SDL_EVENT_DISPLAY_CONTENT_SCALE_CHANGED);
+#if SDL_VERSION_ATLEAST(3, 4, 0)
+			EV_CASE_STR(SDL_EVENT_DISPLAY_USABLE_BOUNDS_CHANGED);
+			EV_CASE_STR(SDL_EVENT_SCREEN_KEYBOARD_SHOWN);
+			EV_CASE_STR(SDL_EVENT_SCREEN_KEYBOARD_HIDDEN);
+			EV_CASE_STR(SDL_EVENT_PINCH_BEGIN);
+			EV_CASE_STR(SDL_EVENT_PINCH_UPDATE);
+			EV_CASE_STR(SDL_EVENT_PINCH_END);
+#endif
+#if 0 // TODO: No release for these yet. 
+			EV_CASE_STR(SDL_EVENT_WINDOW_SETTINGS_CHANGED);
+			EV_CASE_STR(SDL_EVENT_GAMEPAD_CAPSENSE_TOUCH);
+			EV_CASE_STR(SDL_EVENT_GAMEPAD_CAPSENSE_RELEASE);
+			EV_CASE_STR(SDL_EVENT_NOTIFICATION_ACTION_INVOKED);
+#endif
 			EV_CASE_STR(SDL_EVENT_WINDOW_SHOWN);
 			EV_CASE_STR(SDL_EVENT_WINDOW_HIDDEN);
 			EV_CASE_STR(SDL_EVENT_WINDOW_EXPOSED);
@@ -380,6 +398,7 @@ namespace sdl::utils
 			EV_CASE_STR(SDL_EVENT_USER_POINTER_DEFAULT);
 			EV_CASE_STR(SDL_EVENT_USER_POINTER_POSITION);
 			EV_CASE_STR(SDL_EVENT_USER_POINTER_SET);
+			EV_CASE_STR(SDL_EVENT_USER_RAIL_MOVE);
 			EV_CASE_STR(SDL_EVENT_USER_QUIT);
 
 			EV_CASE_STR(SDL_EVENT_LAST);
@@ -447,6 +466,22 @@ namespace sdl::utils
 				return SCALE_MODE_WAYLAND;
 		}
 		return SCALE_MODE_INVALID;
+	}
+
+	static bool isVideoDriver(const char* name)
+	{
+		const auto driver = SDL_GetCurrentVideoDriver();
+		return driver && name && (strcmp(driver, name) == 0);
+	}
+
+	bool isWaylandDriver()
+	{
+		return isVideoDriver("wayland");
+	}
+
+	bool isX11Driver()
+	{
+		return isVideoDriver("x11");
 	}
 
 	std::string windowTitle(const rdpSettings* settings)

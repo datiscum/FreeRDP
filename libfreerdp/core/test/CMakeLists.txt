@@ -13,7 +13,7 @@ if(BUILD_TESTING_INTERNAL)
   list(APPEND TESTS TestStreamDump.c TestRdstls.c TestServerChannels.c)
 endif()
 
-set(FUZZERS TestFuzzCoreClient.c TestFuzzCoreServer.c TestFuzzCryptoCertificateDataSetPEM.c)
+set(FUZZERS TestFuzzCoreClient.c TestFuzzCoreServer.c TestFuzzCoreGateway.c TestFuzzCryptoCertificateDataSetPEM.c)
 
 # TestFuzzServer generates a live cert via winpr-tools (makecert).
 if(NOT WIN32 AND WITH_WINPR_TOOLS)
@@ -48,10 +48,9 @@ add_compile_definitions(TESTING_SRC_DIRECTORY="${PROJECT_SOURCE_DIR}")
 # TestCore does not call winpr-tools APIs. The link was added with
 # TestFuzzServer's on-the-fly cert generation and broke -DWITH_WINPR_TOOLS=OFF.
 target_link_libraries(${MODULE_NAME} PRIVATE freerdp-client)
+set(CORE_FUZZER_LIBS freerdp-client ${OPENSSL_LIBRARIES})
 if(WITH_WINPR_TOOLS)
-  set(CORE_FUZZER_LIBS "freerdp-client winpr-tools")
-else()
-  set(CORE_FUZZER_LIBS "freerdp-client")
+  list(APPEND CORE_FUZZER_LIBS winpr-tools)
 endif()
 
 include(AddFuzzerTest)

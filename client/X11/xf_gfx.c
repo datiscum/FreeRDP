@@ -304,12 +304,22 @@ static BOOL xf_shm_create_surface_image(xfContext* xfc, xfGfxSurface* surface)
 	if (!shminfo)
 		return FALSE;
 
+	/* Preserve the GDI stride, including upstream's extra SIMD safety bytes. */
+	const UINT32 storageWidth =
+	    surface->gdi.scanline / FreeRDPGetBytesPerPixel(surface->gdi.format);
 	XImage* image = XShmCreateImage(xfc->display, xfc->visual,
 	                                WINPR_ASSERTING_INT_CAST(uint32_t, xfc->depth), ZPixmap,
-	                                NULL, shminfo, surface->gdi.width,
+	                                NULL, shminfo, storageWidth,
 	                                surface->gdi.height);
 	if (!image)
 	{
+		free(shminfo);
+		return FALSE;
+	}
+
+	if ((image->bytes_per_line <= 0) || ((UINT32)image->bytes_per_line < surface->gdi.scanline))
+	{
+		XDestroyImage(image);
 		free(shminfo);
 		return FALSE;
 	}
@@ -375,7 +385,7 @@ static BOOL xf_shm_create_surface_image(xfContext* xfc, xfGfxSurface* surface)
 		WLog_INFO(TAG,
 		          "XShm runtime: enabled version=%d.%d sharedPixmaps=%s image=%ux%u bpl=%d size=%zu",
 		          g_xf_shm_runtime_major, g_xf_shm_runtime_minor,
-		          g_xf_shm_runtime_pixmaps ? "yes" : "no", surface->gdi.width,
+		          g_xf_shm_runtime_pixmaps ? "yes" : "no", storageWidth,
 		          surface->gdi.height, image->bytes_per_line, size);
 		g_xf_shm_runtime_ok_logged = TRUE;
 	}
@@ -2323,15 +2333,22 @@ static BOOL xf_vaapi_ensure_h264(xfContext* xfc, xfGfxSurface* surface)
 		goto fail;
 	}
 
-	if (!h264_context_get_option(surface->vaapiH264, H264_CONTEXT_OPTION_HW_ACCEL))
+	/* Enabling hardware reinitializes the decoder in 3.32.2; set its size first. */
+	if (!h264_context_set_option(surface->vaapiH264, H264_CONTEXT_OPTION_HW_ACCEL, TRUE))
 	{
-		WLog_WARN(TAG, "VAAPI direct: ensure_h264 failed at HW_ACCEL option");
+		WLog_WARN(TAG, "VAAPI direct: ensure_h264 failed at enabling hardware decoding");
+		goto fail;
+	}
+
+	if (!h264_context_get_option(surface->vaapiH264, H264_CONTEXT_OPTION_VAAPI_OUTPUT))
+	{
+		WLog_WARN(TAG, "VAAPI direct: hardware decoder cannot provide VAAPI output");
 		goto fail;
 	}
 
 	XF_VAAPI_DIAG_INFO( "VAAPI direct: H264 context ready surface=%u coded=%ux%u visible=%ux%u hwaccel=%d",
 	          surface->gdi.surfaceId, codedWidth, codedHeight, visibleWidth, visibleHeight,
-	          h264_context_get_option(surface->vaapiH264, H264_CONTEXT_OPTION_HW_ACCEL) ? 1 : 0);
+	          h264_context_get_option(surface->vaapiH264, H264_CONTEXT_OPTION_VAAPI_OUTPUT) ? 1 : 0);
 
 	surface->vaapiDirectReady = TRUE;
 	return TRUE;
@@ -3022,7 +3039,6 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
                              const RDPGFX_CREATE_SURFACE_PDU* createSurface)
 {
 	UINT ret = CHANNEL_RC_NO_MEMORY;
-	size_t size = 0;
 	WINPR_ASSERT(context);
 	WINPR_ASSERT(createSurface);
 
@@ -3043,13 +3059,15 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
 	}
 
 	surface->gdi.surfaceId = createSurface->surfaceId;
-	surface->gdi.width = x11_pad_scanline(createSurface->width, 0);
-	surface->gdi.height = x11_pad_scanline(createSurface->height, 0);
+	surface->gdi.width = x11_pad_scanline(createSurface->width, 16);
+	surface->gdi.height = x11_pad_scanline(createSurface->height, 16);
 	surface->gdi.mappedWidth = createSurface->width;
 	surface->gdi.mappedHeight = createSurface->height;
 	surface->gdi.outputTargetWidth = createSurface->width;
 	surface->gdi.outputTargetHeight = createSurface->height;
 
+	const BOOL rails =
+	    freerdp_settings_get_bool(gdi->context->settings, FreeRDP_RemoteApplicationMode);
 	switch (createSurface->pixelFormat)
 	{
 		case GFX_PIXEL_FORMAT_ARGB_8888:
@@ -3057,7 +3075,7 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
 			break;
 
 		case GFX_PIXEL_FORMAT_XRGB_8888:
-			surface->gdi.format = PIXEL_FORMAT_BGRA32;
+			surface->gdi.format = rails ? PIXEL_FORMAT_BGRA32 : PIXEL_FORMAT_BGRX32;
 			break;
 
 		default:
@@ -3066,11 +3084,16 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
 			goto fail;
 	}
 
+	const UINT32 pad = WINPR_ASSERTING_INT_CAST(uint32_t, xfc->scanline_pad);
+	if (surface->gdi.width > UINT32_MAX / FreeRDPGetBytesPerPixel(surface->gdi.format) - 16 - pad)
+		goto fail;
+
+	/* Align to multiples of 16, but also add additional 16 bytes so SIMD implementations do not
+	 * accidentally read out of bound */
 	surface->gdi.scanline = surface->gdi.width * FreeRDPGetBytesPerPixel(surface->gdi.format);
-	surface->gdi.scanline = x11_pad_scanline(surface->gdi.scanline,
-	                                         WINPR_ASSERTING_INT_CAST(uint32_t, xfc->scanline_pad));
-	size = 1ull * surface->gdi.scanline * surface->gdi.height;
-	surface->gdi.data = (BYTE*)winpr_aligned_malloc(size, 16);
+	surface->gdi.scanline = x11_pad_scanline(surface->gdi.scanline, pad) + 16ul;
+
+	surface->gdi.data = (BYTE*)winpr_aligned_calloc(surface->gdi.scanline, surface->gdi.height, 16);
 
 	if (!surface->gdi.data)
 	{
@@ -3078,7 +3101,8 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
 		goto fail;
 	}
 
-	memset(surface->gdi.data, 0xff, size);
+	for (UINT64 y = 0; y < surface->gdi.height; y++)
+		memset(&surface->gdi.data[surface->gdi.scanline * y], 0xff, surface->gdi.scanline);
 
 	if (FreeRDPAreColorFormatsEqualNoAlpha(gdi->dstFormat, surface->gdi.format))
 	{
@@ -3104,11 +3128,16 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
 	{
 		UINT32 width = surface->gdi.width;
 		UINT32 bytes = FreeRDPGetBytesPerPixel(gdi->dstFormat);
+		if (width > UINT32_MAX / bytes - 16 - pad)
+			goto fail;
+
+		/* Align to multiples of scanline_pad, but also add additional 16 bytes so SIMD
+		 * implementations do not accidentally read out of bound */
 		surface->stageScanline = width * bytes;
-		surface->stageScanline = x11_pad_scanline(
-		    surface->stageScanline, WINPR_ASSERTING_INT_CAST(uint32_t, xfc->scanline_pad));
-		size = 1ull * surface->stageScanline * surface->gdi.height;
-		surface->stage = (BYTE*)winpr_aligned_malloc(size, 16);
+		surface->stageScanline = x11_pad_scanline(surface->stageScanline, pad) + 16ul;
+
+		surface->stage =
+		    (BYTE*)winpr_aligned_calloc(surface->stageScanline, surface->gdi.height, 16);
 
 		if (!surface->stage)
 		{
@@ -3116,7 +3145,9 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
 			goto fail;
 		}
 
-		memset(surface->stage, 0xff, size);
+		for (UINT64 y = 0; y < surface->gdi.height; y++)
+			memset(&surface->stage[surface->stageScanline * y], 0xff, surface->stageScanline);
+
 		WINPR_ASSERT(xfc->depth != 0);
 		surface->image = LogDynAndXCreateImage(
 		    xfc->log, xfc->display, xfc->visual, WINPR_ASSERTING_INT_CAST(uint32_t, xfc->depth),

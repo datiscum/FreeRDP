@@ -41,19 +41,11 @@
 		}                                                                              \
 	} while (0)
 
-BOOL Stream_EnsureCapacity(wStream* s, size_t size)
+BOOL Stream_ResizeToCapacity(wStream* s, size_t size)
 {
-	WINPR_ASSERT(s);
-	if (s->capacity >= size)
-		return TRUE;
-
-	const size_t increment = 128ull;
-	if (size > SIZE_MAX - increment)
-		return FALSE;
-
 	const size_t old_capacity = s->capacity;
-	const size_t new_capacity = size + increment - size % increment;
-	const size_t position = Stream_GetPosition(s);
+	const size_t new_capacity = size;
+	size_t position = Stream_GetPosition(s);
 
 	BYTE* new_buf = nullptr;
 	if (!s->isOwner)
@@ -75,9 +67,26 @@ BOOL Stream_EnsureCapacity(wStream* s, size_t size)
 	s->buffer = new_buf;
 	s->capacity = new_capacity;
 	s->length = new_capacity;
-	ZeroMemory(&s->buffer[old_capacity], s->capacity - old_capacity);
+	if (old_capacity < new_capacity)
+		ZeroMemory(&s->buffer[old_capacity], s->capacity - old_capacity);
 
+	if (position > new_capacity)
+		position = new_capacity;
 	return Stream_SetPosition(s, position);
+}
+
+BOOL Stream_EnsureCapacity(wStream* s, size_t size)
+{
+	WINPR_ASSERT(s);
+	if (s->capacity >= size)
+		return TRUE;
+
+	const size_t increment = 128ull;
+	if (size > SIZE_MAX - increment)
+		return FALSE;
+
+	const size_t new_capacity = size + increment - size % increment;
+	return Stream_ResizeToCapacity(s, new_capacity);
 }
 
 BOOL Stream_EnsureRemainingCapacity(wStream* s, size_t size)
@@ -447,15 +456,18 @@ BOOL Stream_CheckAndLogRequiredLengthWLogExVa(wLog* log, DWORD level, wStream* s
 
 	if (actual < nmemb)
 	{
-		char prefix[1024] = WINPR_C_ARRAY_INIT;
+		if (WLog_IsLevelActive(log, level))
+		{
+			char prefix[1024] = WINPR_C_ARRAY_INIT;
 
-		(void)vsnprintf(prefix, sizeof(prefix), fmt, args);
+			(void)vsnprintf(prefix, sizeof(prefix), fmt, args);
 
-		WLog_Print(log, level,
-		           "[%s] invalid length, got %" PRIuz ", require at least %" PRIuz
-		           " [element size=%" PRIuz "]",
-		           prefix, actual, nmemb, size);
-		winpr_log_backtrace_ex(log, level, 20);
+			WLog_Print(log, level,
+			           "[%s] invalid length, got %" PRIuz ", require at least %" PRIuz
+			           " [element size=%" PRIuz "]",
+			           prefix, actual, nmemb, size);
+			winpr_log_backtrace_ex(log, level, 20);
+		}
 		return FALSE;
 	}
 	return TRUE;
@@ -465,22 +477,25 @@ SSIZE_T Stream_Write_UTF16_String_From_UTF8(wStream* s, size_t wcharLength, cons
                                             size_t length, BOOL fill)
 {
 	SSIZE_T rc = 0;
-	WCHAR* str = Stream_PointerAs(s, WCHAR);
+	if (!Stream_CheckAndLogRequiredCapacityOfSize(STREAM_TAG, s, wcharLength, sizeof(WCHAR)))
+		return -1;
 
 	if (length != 0)
 	{
-		if (!Stream_CheckAndLogRequiredCapacityOfSize(STREAM_TAG, s, wcharLength, sizeof(WCHAR)))
+		size_t wlen = 0;
+		WCHAR* str = ConvertUtf8NToWCharAlloc(src, length, &wlen);
+		if (!str)
 			return -1;
 
-		rc = ConvertUtf8NToWChar(src, length, str, wcharLength);
-		if (rc < 0)
-			return -1;
-
-		Stream_Seek(s, (size_t)rc * sizeof(WCHAR));
+		if (wlen > wcharLength)
+			wlen = wcharLength;
+		Stream_Write(s, str, wlen * sizeof(WCHAR));
+		free(str);
+		rc = WINPR_ASSERTING_INT_CAST(SSIZE_T, wlen);
 	}
 
 	if (fill)
-		Stream_Zero(s, (wcharLength - (size_t)rc) * sizeof(WCHAR));
+		Stream_Zero(s, (wcharLength - WINPR_ASSERTING_INT_CAST(size_t, rc)) * sizeof(WCHAR));
 	return rc;
 }
 

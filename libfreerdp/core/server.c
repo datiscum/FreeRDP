@@ -225,7 +225,7 @@ static BOOL wts_read_drdynvc_data_first(rdpPeerChannel* channel, wStream* s, int
 
 	const UINT32 value = wts_read_variable_uint(s, cbLen, &channel->dvc_total_length);
 
-	if (value == 0)
+	if ((value == 0) || (channel->dvc_total_length == 0))
 		return FALSE;
 
 	const size_t length = Stream_GetRemainingLength(s);
@@ -234,7 +234,7 @@ static BOOL wts_read_drdynvc_data_first(rdpPeerChannel* channel, wStream* s, int
 
 	Stream_ResetPosition(channel->receiveData);
 
-	if (!Stream_EnsureRemainingCapacity(channel->receiveData, channel->dvc_total_length))
+	if (!Stream_EnsureRemainingCapacity(channel->receiveData, length))
 		return FALSE;
 
 	Stream_Write(channel->receiveData, Stream_ConstPointer(s), length);
@@ -261,6 +261,9 @@ static BOOL wts_read_drdynvc_data(rdpPeerChannel* channel, wStream* s)
 			WLog_ERR(TAG, "incorrect fragment data, discarded.");
 			return FALSE;
 		}
+
+		if (!Stream_EnsureRemainingCapacity(channel->receiveData, length))
+			return FALSE;
 
 		Stream_Write(channel->receiveData, Stream_ConstPointer(s), length);
 
@@ -538,9 +541,7 @@ static BOOL WTSProcessChannelData(rdpPeerChannel* channel, UINT16 channelId, con
 	if ((flags & CHANNEL_FLAG_LAST) != 0)
 	{
 		if (Stream_GetPosition(channel->receiveData) != totalSize)
-		{
-			WLog_ERR(TAG, "read error");
-		}
+			return FALSE;
 
 		if (channel == channel->vcm->drdynvc_channel)
 		{
@@ -558,6 +559,8 @@ static BOOL WTSProcessChannelData(rdpPeerChannel* channel, UINT16 channelId, con
 
 		Stream_ResetPosition(channel->receiveData);
 	}
+	else if (Stream_GetPosition(channel->receiveData) >= totalSize)
+		return FALSE;
 
 	return ret;
 }
@@ -1128,7 +1131,7 @@ HANDLE WINAPI FreeRDP_WTSOpenServerA(LPSTR pServerName)
 {
 	wObject queueCallbacks = WINPR_C_ARRAY_INIT;
 
-	rdpContext* context = (rdpContext*)pServerName;
+	rdpContext* context = WINPR_PACKED_ALIGN_CAST(rdpContext*, pServerName);
 
 	if (!setup() || !context)
 		return INVALID_HANDLE_VALUE;

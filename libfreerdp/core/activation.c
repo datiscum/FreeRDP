@@ -350,6 +350,14 @@ BOOL rdp_send_client_persistent_key_list_pdu(rdpRdp* rdp)
 	WLog_DBG(TAG, "Persistent Key List: TotalKeyCount: %" PRIu16 " MaxKeyFrag: %" PRIu16, keyCount,
 	         keyMaxFrag);
 
+	const UINT32 cellInfoCount =
+	    freerdp_settings_get_uint32(settings, FreeRDP_BitmapCacheV2NumCells);
+	if (cellInfoCount != 5)
+	{
+		WLog_ERR(TAG, "BitmapCacheV2NumCells %" PRIu32 ", but must be 5. Aborting.", cellInfoCount);
+		free(keyList);
+		return FALSE;
+	}
 	// MS-RDPBCGR recommends sending no more than 169 entries at once.
 	// In practice, sending more than 2042 entries at once triggers an error.
 	// It should be possible to advertise the entire client bitmap cache
@@ -548,6 +556,9 @@ BOOL rdp_recv_font_map_pdu(rdpRdp* rdp, wStream* s)
 	WINPR_ASSERT(rdp->settings);
 	WINPR_ASSERT(s);
 	WINPR_ASSERT(!freerdp_settings_get_bool(rdp->settings, FreeRDP_ServerMode));
+
+	if (!rdp_has_reached_state(rdp, CONNECTION_STATE_FINALIZATION_CLIENT_FONT_MAP))
+		return FALSE;
 
 	/* Do not fail here, see https://github.com/FreeRDP/FreeRDP/issues/925 */
 	if (Stream_CheckAndLogRequiredLength(TAG, s, 8))

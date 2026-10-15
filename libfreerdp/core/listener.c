@@ -184,10 +184,10 @@ static BOOL freerdp_listener_open(freerdp_listener* instance, const char* bind_a
 		option_value = 1;
 
 		if (ai->ai_family == AF_INET)
-			sin_addr = &(((struct sockaddr_in*)ai->ai_addr)->sin_addr);
+			sin_addr = &((WINPR_PACKED_ALIGN_CAST(struct sockaddr_in*, ai->ai_addr))->sin_addr);
 		else
 		{
-			sin_addr = &(((struct sockaddr_in6*)ai->ai_addr)->sin6_addr);
+			sin_addr = &((WINPR_PACKED_ALIGN_CAST(struct sockaddr_in6*, ai->ai_addr))->sin6_addr);
 			if (setsockopt(sockfd, IPPROTO_IPV6, IPV6_V6ONLY, (void*)&option_value,
 			               sizeof(option_value)) == -1)
 				WLog_ERR(TAG, "setsockopt");
@@ -520,9 +520,10 @@ static BOOL freerdp_listener_check_fds(freerdp_listener* instance)
 
 freerdp_listener* freerdp_listener_new(void)
 {
-	freerdp_listener* instance = nullptr;
-	rdpListener* listener = nullptr;
-	instance = (freerdp_listener*)calloc(1, sizeof(freerdp_listener));
+	if (!utils_set_umask())
+		return nullptr;
+
+	freerdp_listener* instance = (freerdp_listener*)calloc(1, sizeof(freerdp_listener));
 
 	if (!instance)
 		return nullptr;
@@ -536,7 +537,7 @@ freerdp_listener* freerdp_listener_new(void)
 	instance->GetEventHandles = freerdp_listener_get_event_handles;
 	instance->CheckFileDescriptor = freerdp_listener_check_fds;
 	instance->Close = freerdp_listener_close;
-	listener = (rdpListener*)calloc(1, sizeof(rdpListener));
+	rdpListener* listener = (rdpListener*)calloc(1, sizeof(rdpListener));
 
 	if (!listener)
 	{

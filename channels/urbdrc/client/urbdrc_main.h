@@ -27,6 +27,8 @@
 
 #include <msusb.h>
 
+#include "urbdrc_types.h"
+
 #define DEVICE_HARDWARE_ID_SIZE 32
 #define DEVICE_COMPATIBILITY_ID_SIZE 36
 #define DEVICE_INSTANCE_STR_SIZE 37
@@ -139,8 +141,8 @@ struct S_IUDEVICE
 
 	WINPR_ATTR_NODISCARD int (*query_device_descriptor)(IUDEVICE* idev, int offset);
 
-	/** Negotiated bus speed, as a \ref device_speed value. */
-	WINPR_ATTR_NODISCARD int (*query_device_speed)(IUDEVICE* idev);
+	/** Negotiated bus speed. */
+	WINPR_ATTR_NODISCARD enum device_speed (*query_device_speed)(IUDEVICE* idev);
 
 	WINPR_ATTR_NODISCARD BOOL (*detach_kernel_driver)(IUDEVICE* idev);
 
@@ -148,6 +150,8 @@ struct S_IUDEVICE
 
 	WINPR_ATTR_NODISCARD int (*query_device_port_status)(IUDEVICE* idev, UINT32* UsbdStatus,
 	                                                     UINT32* BufferSize, BYTE* Buffer);
+
+	WINPR_ATTR_NODISCARD int (*reset_device)(IUDEVICE* idev);
 
 	WINPR_ATTR_NODISCARD MSUSB_CONFIG_DESCRIPTOR* (*complete_msconfig_setup)(
 	    IUDEVICE* idev, MSUSB_CONFIG_DESCRIPTOR* MsConfig);
@@ -161,7 +165,7 @@ struct S_IUDEVICE
 	void (*setAlreadySend)(IUDEVICE* idev);
 	void (*setChannelClosed)(IUDEVICE* idev);
 	void (*markChannelClosed)(IUDEVICE* idev);
-	WINPR_ATTR_NODISCARD char* (*getPath)(IUDEVICE* idev);
+	WINPR_ATTR_NODISCARD const char* (*getPath)(IUDEVICE* idev);
 
 	void (*free)(IUDEVICE* idev);
 
@@ -211,6 +215,10 @@ struct S_IUDEVMAN
 
 	IWTSPlugin* plugin;
 	UINT32 controlChannelId;
+	/* The control channel, set when it is established and cleared in its OnClose callback, both
+	 * under loading_lock. Used instead of looking the channel up by id: the lookup takes the
+	 * dynamic channel table lock, and drdynvc calls OnClose with that lock held. */
+	IWTSVirtualChannel* controlChannel;
 	UINT32 status;
 };
 

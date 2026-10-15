@@ -32,6 +32,13 @@
 #include <winpr/stream.h>
 #include <winpr/library.h>
 #include <winpr/smartcard.h>
+#include <winpr/synch.h>
+#include <winpr/sysinfo.h>
+#include <winpr/thread.h>
+#include <winpr/collections.h>
+
+#include <errno.h>
+#include <stdlib.h>
 
 #include <freerdp/freerdp.h>
 #include <freerdp/channels/rdpdr.h>
@@ -49,15 +56,20 @@
 #if defined(WITH_SMARTCARD_EMULATE)
 #include <freerdp/emulate/scard/smartcard_emulate.h>
 
-#define wrap_raw(ctx, fkt, ...)                                         \
-	ctx->useEmulatedCard ? Emulate_##fkt(ctx->emulation, ##__VA_ARGS__) \
-	                     : ctx->pWinSCardApi->pfn##fkt(__VA_ARGS__)
+/* The ternary is fully parenthesized: on _WIN32 wrap() below expands straight to wrap_raw(),
+ * so an unparenthesized ternary would swallow any operator applied to the result. For example
+ * `wrap(ctx, SCardIsValidContext, h) == SCARD_S_SUCCESS` would parse as
+ * `useEmulatedCard ? Emulate_...(h) : (pfn...(h) == SCARD_S_SUCCESS)`, i.e. the comparison only
+ * applies to the non-emulated branch. */
+#define wrap_raw(ctx, fkt, ...)                                              \
+	((ctx)->useEmulatedCard ? Emulate_##fkt((ctx)->emulation, ##__VA_ARGS__) \
+	                        : (ctx)->pWinSCardApi->pfn##fkt(__VA_ARGS__))
 #define wrap_ptr(ctx, fkt, ...) wrap_raw(ctx, fkt, ##__VA_ARGS__)
 #else
 #define wrap_raw(ctx, fkt, ...) \
-	ctx->useEmulatedCard ? SCARD_F_INTERNAL_ERROR : ctx->pWinSCardApi->pfn##fkt(__VA_ARGS__)
+	((ctx)->useEmulatedCard ? SCARD_F_INTERNAL_ERROR : (ctx)->pWinSCardApi->pfn##fkt(__VA_ARGS__))
 #define wrap_ptr(ctx, fkt, ...) \
-	ctx->useEmulatedCard ? nullptr : ctx->pWinSCardApi->pfn##fkt(__VA_ARGS__)
+	((ctx)->useEmulatedCard ? nullptr : (ctx)->pWinSCardApi->pfn##fkt(__VA_ARGS__))
 #endif
 
 #if defined(_WIN32)
@@ -92,6 +104,12 @@ struct s_scard_call_context
 	void (*fn_free)(void*);
 	wLog* log;
 	rdpContext* context;
+
+	/* idle transaction watchdog */
+	wHashTable* handleStates;
+	HANDLE watchdogStopEvent;
+	HANDLE watchdogThread;
+	UINT64 transactionTimeout;
 };
 
 struct s_scard_context_element
@@ -102,8 +120,254 @@ struct s_scard_context_element
 
 static void context_free(void* arg);
 
-static LONG smartcard_EstablishContext_Call(scard_call_context* smartcard, wStream* out,
-                                            SMARTCARD_OPERATION* operation)
+/* Windows resets the card when a transaction is idle for 5 s, pcsc-lite does not.
+ * FREERDP_SCARD_TRANSACTION_TIMEOUT_MS overrides the timeout, 0 disables it */
+#define SCARD_TRANSACTION_IDLE_TIMEOUT_MS 5000
+#define SCARD_TRANSACTION_WATCHDOG_INTERVAL_MS 250
+#define SCARD_TRANSACTION_WATCHDOG_MAX_EXPIRED 32
+
+typedef struct
+{
+	BOOL inTransaction;
+	BOOL disconnected;
+	UINT32 activeCalls;
+	UINT32 pendingBegins;
+	UINT32 abandonedBegins;
+	UINT64 lastActivity;
+} scard_handle_state;
+
+typedef struct
+{
+	UINT64 now;
+	UINT64 timeout;
+	size_t count;
+	SCARDHANDLE handles[SCARD_TRANSACTION_WATCHDOG_MAX_EXPIRED];
+} scard_expired_transactions;
+
+static void smartcard_handle_activity_begin(scard_call_context* ctx, UINT32 ioControlCode,
+                                            SCARDHANDLE hCard)
+{
+	WINPR_ASSERT(ctx);
+
+	if (!ctx->handleStates || !hCard)
+		return;
+
+	HashTable_Lock(ctx->handleStates);
+	scard_handle_state* state = HashTable_GetItemValue(ctx->handleStates, (void*)hCard);
+	if (!state)
+	{
+		state = calloc(1, sizeof(scard_handle_state));
+		if (state && !HashTable_Insert(ctx->handleStates, (void*)hCard, state))
+		{
+			free(state);
+			state = nullptr;
+		}
+	}
+	if (state)
+	{
+		state->activeCalls++;
+		state->lastActivity = GetTickCount64();
+
+		switch (ioControlCode)
+		{
+			case SCARD_IOCTL_BEGINTRANSACTION:
+				state->pendingBegins++;
+				break;
+			case SCARD_IOCTL_ENDTRANSACTION:
+				/* the server gave up waiting, release it when granted */
+				if (state->inTransaction)
+					state->inTransaction = FALSE;
+				else if (state->pendingBegins > state->abandonedBegins)
+					state->abandonedBegins++;
+				break;
+			default:
+				break;
+		}
+	}
+	// NOLINTNEXTLINE(clang-analyzer-unix.Malloc): HashTable_Insert owns state
+	HashTable_Unlock(ctx->handleStates);
+}
+
+/* returns TRUE if a transaction the server gave up on was granted */
+static BOOL smartcard_handle_activity_end(scard_call_context* ctx, UINT32 ioControlCode,
+                                          SCARDHANDLE hCard, LONG result)
+{
+	BOOL abandoned = FALSE;
+
+	WINPR_ASSERT(ctx);
+
+	if (!ctx->handleStates || !hCard)
+		return FALSE;
+
+	HashTable_Lock(ctx->handleStates);
+	scard_handle_state* state = HashTable_GetItemValue(ctx->handleStates, (void*)hCard);
+	if (state)
+	{
+		if (state->activeCalls > 0)
+			state->activeCalls--;
+		state->lastActivity = GetTickCount64();
+
+		switch (ioControlCode)
+		{
+			case SCARD_IOCTL_BEGINTRANSACTION:
+				if (state->pendingBegins > 0)
+					state->pendingBegins--;
+				if (state->abandonedBegins > 0)
+				{
+					state->abandonedBegins--;
+					abandoned = (result == SCARD_S_SUCCESS);
+				}
+				else if (result == SCARD_S_SUCCESS)
+					state->inTransaction = TRUE;
+				break;
+			case SCARD_IOCTL_DISCONNECT:
+				if (result == SCARD_S_SUCCESS)
+				{
+					state->inTransaction = FALSE;
+					state->disconnected = TRUE;
+				}
+				break;
+			default:
+				break;
+		}
+
+		if (state->disconnected && (state->activeCalls == 0))
+			HashTable_Remove(ctx->handleStates, (void*)hCard);
+	}
+	HashTable_Unlock(ctx->handleStates);
+	return abandoned;
+}
+
+static BOOL smartcard_collect_expired_transaction(const void* key, void* value, void* arg)
+{
+	scard_handle_state* state = value;
+	scard_expired_transactions* expired = arg;
+
+	WINPR_ASSERT(state);
+	WINPR_ASSERT(expired);
+
+	if (!state->inTransaction || (state->activeCalls > 0))
+		return TRUE;
+	if (expired->now - state->lastActivity < expired->timeout)
+		return TRUE;
+	if (expired->count >= ARRAYSIZE(expired->handles))
+		return FALSE; /* rest on the next round */
+
+	state->inTransaction = FALSE;
+	expired->handles[expired->count++] = (SCARDHANDLE)key;
+	return TRUE;
+}
+
+static DWORD WINAPI smartcard_transaction_watchdog(LPVOID arg)
+{
+	scard_call_context* ctx = arg;
+
+	WINPR_ASSERT(ctx);
+
+	while (WaitForSingleObject(ctx->watchdogStopEvent, SCARD_TRANSACTION_WATCHDOG_INTERVAL_MS) ==
+	       WAIT_TIMEOUT)
+	{
+		scard_expired_transactions expired = WINPR_C_ARRAY_INIT;
+		expired.now = GetTickCount64();
+		expired.timeout = ctx->transactionTimeout;
+
+		if (!HashTable_Foreach(ctx->handleStates, smartcard_collect_expired_transaction, &expired))
+			WLog_Print(ctx->log, WLOG_DEBUG,
+			           "more idle transactions than handled in one round, continuing next round");
+
+		/* not locked, SCardEndTransaction may block */
+		for (size_t x = 0; x < expired.count; x++)
+		{
+			const SCARDHANDLE hCard = expired.handles[x];
+
+			WLog_Print(ctx->log, WLOG_WARN,
+			           "transaction on hCard 0x%08" PRIxz " idle for more than %" PRIu64
+			           " ms, ending it and resetting the card like Windows does",
+			           (size_t)hCard, ctx->transactionTimeout);
+
+			const LONG rc = wrap(ctx, SCardEndTransaction, hCard, SCARD_RESET_CARD);
+			if (rc == SCARD_E_INVALID_HANDLE)
+				HashTable_Remove(ctx->handleStates, (void*)hCard);
+		}
+	}
+
+	ExitThread(0);
+	return 0;
+}
+
+static UINT64 smartcard_transaction_timeout(void)
+{
+	// NOLINTNEXTLINE(concurrency-mt-unsafe)
+	const char* value = getenv("FREERDP_SCARD_TRANSACTION_TIMEOUT_MS");
+	if (!value || !*value)
+		return SCARD_TRANSACTION_IDLE_TIMEOUT_MS;
+
+	char* end = nullptr;
+	errno = 0;
+	const unsigned long long timeout = strtoull(value, &end, 10);
+	if ((errno != 0) || !end || (*end != '\0'))
+		return SCARD_TRANSACTION_IDLE_TIMEOUT_MS;
+	return timeout;
+}
+
+static BOOL smartcard_transaction_watchdog_start(scard_call_context* ctx)
+{
+	WINPR_ASSERT(ctx);
+
+	if (ctx->useEmulatedCard)
+		return TRUE;
+
+	ctx->handleStates = HashTable_New(TRUE);
+	if (!ctx->handleStates)
+		return FALSE;
+
+	{
+		wObject* obj = HashTable_ValueObject(ctx->handleStates);
+		WINPR_ASSERT(obj);
+		obj->fnObjectFree = free;
+	}
+
+	ctx->transactionTimeout = smartcard_transaction_timeout();
+	if (ctx->transactionTimeout == 0)
+	{
+		WLog_Print(ctx->log, WLOG_DEBUG, "idle transaction watchdog disabled");
+		return TRUE;
+	}
+
+	ctx->watchdogStopEvent = CreateEventA(nullptr, TRUE, FALSE, nullptr);
+	if (!ctx->watchdogStopEvent)
+		return FALSE;
+
+	ctx->watchdogThread = CreateThread(nullptr, 0, smartcard_transaction_watchdog, ctx, 0, nullptr);
+	if (!ctx->watchdogThread)
+		return FALSE;
+
+	WLog_Print(ctx->log, WLOG_DEBUG, "idle transaction watchdog started, timeout %" PRIu64 " ms",
+	           ctx->transactionTimeout);
+	return TRUE;
+}
+
+static void smartcard_transaction_watchdog_stop(scard_call_context* ctx)
+{
+	WINPR_ASSERT(ctx);
+
+	if (ctx->watchdogThread)
+	{
+		(void)SetEvent(ctx->watchdogStopEvent);
+		(void)WaitForSingleObject(ctx->watchdogThread, INFINITE);
+		(void)CloseHandle(ctx->watchdogThread);
+		ctx->watchdogThread = nullptr;
+	}
+	if (ctx->watchdogStopEvent)
+	{
+		(void)CloseHandle(ctx->watchdogStopEvent);
+		ctx->watchdogStopEvent = nullptr;
+	}
+}
+
+WINPR_ATTR_NODISCARD WINPR_ATTR_NODISCARD static LONG
+smartcard_EstablishContext_Call(scard_call_context* smartcard, wStream* out,
+                                SMARTCARD_OPERATION* operation)
 {
 	SCARDCONTEXT hContext = WINPR_C_ARRAY_INIT;
 	EstablishContext_Return ret = WINPR_C_ARRAY_INIT;
@@ -156,9 +420,9 @@ static LONG smartcard_EstablishContext_Call(scard_call_context* smartcard, wStre
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ReleaseContext_Call(scard_call_context* smartcard,
-                                          WINPR_ATTR_UNUSED wStream* out,
-                                          SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ReleaseContext_Call(scard_call_context* smartcard,
+                                                               WINPR_ATTR_UNUSED wStream* out,
+                                                               SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 
@@ -179,9 +443,9 @@ static LONG smartcard_ReleaseContext_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_IsValidContext_Call(scard_call_context* smartcard,
-                                          WINPR_ATTR_UNUSED wStream* out,
-                                          SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_IsValidContext_Call(scard_call_context* smartcard,
+                                                               WINPR_ATTR_UNUSED wStream* out,
+                                                               SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 
@@ -194,8 +458,9 @@ static LONG smartcard_IsValidContext_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ListReaderGroupsA_Call(scard_call_context* smartcard, wStream* out,
-                                             SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ListReaderGroupsA_Call(scard_call_context* smartcard,
+                                                                  wStream* out,
+                                                                  SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	ListReaderGroups_Return ret = WINPR_C_ARRAY_INIT;
@@ -226,8 +491,9 @@ static LONG smartcard_ListReaderGroupsA_Call(scard_call_context* smartcard, wStr
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ListReaderGroupsW_Call(scard_call_context* smartcard, wStream* out,
-                                             SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ListReaderGroupsW_Call(scard_call_context* smartcard,
+                                                                  wStream* out,
+                                                                  SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	ListReaderGroups_Return ret = WINPR_C_ARRAY_INIT;
@@ -265,6 +531,7 @@ static LONG smartcard_ListReaderGroupsW_Call(scard_call_context* smartcard, wStr
 	return ret.ReturnCode;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL filter_match(wLinkedList* list, LPCSTR reader, size_t readerLen)
 {
 	if (readerLen < 1)
@@ -286,6 +553,7 @@ static BOOL filter_match(wLinkedList* list, LPCSTR reader, size_t readerLen)
 	return FALSE;
 }
 
+WINPR_ATTR_NODISCARD
 static DWORD filter_device_by_name_a(wLinkedList* list, LPSTR* mszReaders, DWORD cchReaders)
 {
 	size_t rpos = 0;
@@ -323,6 +591,7 @@ static DWORD filter_device_by_name_a(wLinkedList* list, LPSTR* mszReaders, DWORD
 	return (DWORD)wpos;
 }
 
+WINPR_ATTR_NODISCARD
 static DWORD filter_device_by_name_w(wLinkedList* list, LPWSTR* mszReaders, DWORD cchReaders)
 {
 	DWORD rc = 0;
@@ -350,8 +619,9 @@ static DWORD filter_device_by_name_w(wLinkedList* list, LPWSTR* mszReaders, DWOR
 	return rc;
 }
 
-static LONG smartcard_ListReadersA_Call(scard_call_context* smartcard, wStream* out,
-                                        SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ListReadersA_Call(scard_call_context* smartcard,
+                                                             wStream* out,
+                                                             SMARTCARD_OPERATION* operation)
 {
 	ListReaders_Return ret = WINPR_C_ARRAY_INIT;
 	LPSTR mszReaders = nullptr;
@@ -392,8 +662,9 @@ static LONG smartcard_ListReadersA_Call(scard_call_context* smartcard, wStream* 
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ListReadersW_Call(scard_call_context* smartcard, wStream* out,
-                                        SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ListReadersW_Call(scard_call_context* smartcard,
+                                                             wStream* out,
+                                                             SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	ListReaders_Return ret = WINPR_C_ARRAY_INIT;
@@ -449,9 +720,9 @@ static LONG smartcard_ListReadersW_Call(scard_call_context* smartcard, wStream* 
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_IntroduceReaderGroupA_Call(scard_call_context* smartcard,
-                                                 WINPR_ATTR_UNUSED wStream* out,
-                                                 SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_IntroduceReaderGroupA_Call(scard_call_context* smartcard, WINPR_ATTR_UNUSED wStream* out,
+                                     SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndStringA_Call* call = nullptr;
@@ -467,9 +738,9 @@ static LONG smartcard_IntroduceReaderGroupA_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_IntroduceReaderGroupW_Call(scard_call_context* smartcard,
-                                                 WINPR_ATTR_UNUSED wStream* out,
-                                                 SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_IntroduceReaderGroupW_Call(scard_call_context* smartcard, WINPR_ATTR_UNUSED wStream* out,
+                                     SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndStringW_Call* call = nullptr;
@@ -485,9 +756,9 @@ static LONG smartcard_IntroduceReaderGroupW_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_IntroduceReaderA_Call(scard_call_context* smartcard,
-                                            WINPR_ATTR_UNUSED wStream* out,
-                                            SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_IntroduceReaderA_Call(scard_call_context* smartcard,
+                                                                 WINPR_ATTR_UNUSED wStream* out,
+                                                                 SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndTwoStringA_Call* call = nullptr;
@@ -504,9 +775,9 @@ static LONG smartcard_IntroduceReaderA_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_IntroduceReaderW_Call(scard_call_context* smartcard,
-                                            WINPR_ATTR_UNUSED wStream* out,
-                                            SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_IntroduceReaderW_Call(scard_call_context* smartcard,
+                                                                 WINPR_ATTR_UNUSED wStream* out,
+                                                                 SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndTwoStringW_Call* call = nullptr;
@@ -523,9 +794,9 @@ static LONG smartcard_IntroduceReaderW_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ForgetReaderA_Call(scard_call_context* smartcard,
-                                         WINPR_ATTR_UNUSED wStream* out,
-                                         SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ForgetReaderA_Call(scard_call_context* smartcard,
+                                                              WINPR_ATTR_UNUSED wStream* out,
+                                                              SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndStringA_Call* call = nullptr;
@@ -541,9 +812,9 @@ static LONG smartcard_ForgetReaderA_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ForgetReaderW_Call(scard_call_context* smartcard,
-                                         WINPR_ATTR_UNUSED wStream* out,
-                                         SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ForgetReaderW_Call(scard_call_context* smartcard,
+                                                              WINPR_ATTR_UNUSED wStream* out,
+                                                              SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndStringW_Call* call = nullptr;
@@ -559,9 +830,9 @@ static LONG smartcard_ForgetReaderW_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_AddReaderToGroupA_Call(scard_call_context* smartcard,
-                                             WINPR_ATTR_UNUSED wStream* out,
-                                             SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_AddReaderToGroupA_Call(scard_call_context* smartcard,
+                                                                  WINPR_ATTR_UNUSED wStream* out,
+                                                                  SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndTwoStringA_Call* call = nullptr;
@@ -578,9 +849,9 @@ static LONG smartcard_AddReaderToGroupA_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_AddReaderToGroupW_Call(scard_call_context* smartcard,
-                                             WINPR_ATTR_UNUSED wStream* out,
-                                             SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_AddReaderToGroupW_Call(scard_call_context* smartcard,
+                                                                  WINPR_ATTR_UNUSED wStream* out,
+                                                                  SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndTwoStringW_Call* call = nullptr;
@@ -597,9 +868,9 @@ static LONG smartcard_AddReaderToGroupW_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_RemoveReaderFromGroupA_Call(scard_call_context* smartcard,
-                                                  WINPR_ATTR_UNUSED wStream* out,
-                                                  SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_RemoveReaderFromGroupA_Call(scard_call_context* smartcard, WINPR_ATTR_UNUSED wStream* out,
+                                      SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndTwoStringA_Call* call = nullptr;
@@ -616,9 +887,9 @@ static LONG smartcard_RemoveReaderFromGroupA_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_RemoveReaderFromGroupW_Call(scard_call_context* smartcard,
-                                                  WINPR_ATTR_UNUSED wStream* out,
-                                                  SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_RemoveReaderFromGroupW_Call(scard_call_context* smartcard, WINPR_ATTR_UNUSED wStream* out,
+                                      SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	ContextAndTwoStringW_Call* call = nullptr;
@@ -635,8 +906,9 @@ static LONG smartcard_RemoveReaderFromGroupW_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_LocateCardsA_Call(scard_call_context* smartcard, wStream* out,
-                                        SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_LocateCardsA_Call(scard_call_context* smartcard,
+                                                             wStream* out,
+                                                             SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	LocateCards_Return ret = WINPR_C_ARRAY_INIT;
@@ -664,12 +936,13 @@ static LONG smartcard_LocateCardsA_Call(scard_call_context* smartcard, wStream* 
 
 	for (UINT32 x = 0; x < ret.cReaders; x++)
 	{
+		const LPSCARD_READERSTATEA cstate = &call->rgReaderStates[x];
 		ReaderState_Return* cur = &ret.rgReaderStates[x];
 
-		cur->dwCurrentState = call->rgReaderStates[x].dwCurrentState;
-		cur->dwEventState = call->rgReaderStates[x].dwEventState;
-		cur->cbAtr = call->rgReaderStates[x].cbAtr;
-		CopyMemory(&(cur->rgbAtr), &(call->rgReaderStates[x].rgbAtr), sizeof(cur->rgbAtr));
+		cur->dwCurrentState = cstate->dwCurrentState;
+		cur->dwEventState = cstate->dwEventState;
+		cur->cbAtr = cstate->cbAtr;
+		CopyMemory(&(cur->rgbAtr), &(cstate->rgbAtr), sizeof(cur->rgbAtr));
 		if (!smartcard_reader_state_return_is_valid(x, cur))
 		{
 			free(ret.rgReaderStates);
@@ -678,6 +951,7 @@ static LONG smartcard_LocateCardsA_Call(scard_call_context* smartcard, wStream* 
 	}
 
 	status = smartcard_pack_locate_cards_return(out, &ret);
+	free(ret.rgReaderStates);
 
 	if (status != SCARD_S_SUCCESS)
 		return status;
@@ -685,17 +959,17 @@ static LONG smartcard_LocateCardsA_Call(scard_call_context* smartcard, wStream* 
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_LocateCardsW_Call(scard_call_context* smartcard, wStream* out,
-                                        SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_LocateCardsW_Call(scard_call_context* smartcard,
+                                                             wStream* out,
+                                                             SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	LocateCards_Return ret = WINPR_C_ARRAY_INIT;
-	LocateCardsW_Call* call = nullptr;
 
 	WINPR_ASSERT(smartcard);
 	WINPR_ASSERT(operation);
 
-	call = &operation->call.locateCardsW;
+	LocateCardsW_Call* call = &operation->call.locateCardsW;
 
 	ret.ReturnCode = wrap(smartcard, SCardLocateCardsW, operation->hContext, call->mszCards,
 	                      call->rgReaderStates, call->cReaders);
@@ -714,12 +988,13 @@ static LONG smartcard_LocateCardsW_Call(scard_call_context* smartcard, wStream* 
 
 	for (UINT32 x = 0; x < ret.cReaders; x++)
 	{
+		const LPSCARD_READERSTATEW cstate = &call->rgReaderStates[x];
 		ReaderState_Return* cur = &ret.rgReaderStates[x];
 
-		cur->dwCurrentState = call->rgReaderStates[x].dwCurrentState;
-		cur->dwEventState = call->rgReaderStates[x].dwEventState;
-		cur->cbAtr = call->rgReaderStates[x].cbAtr;
-		CopyMemory(&(cur->rgbAtr), &(call->rgReaderStates[x].rgbAtr), sizeof(cur->rgbAtr));
+		cur->dwCurrentState = cstate->dwCurrentState;
+		cur->dwEventState = cstate->dwEventState;
+		cur->cbAtr = cstate->cbAtr;
+		CopyMemory(&(cur->rgbAtr), &(cstate->rgbAtr), sizeof(cur->rgbAtr));
 		if (!smartcard_reader_state_return_is_valid(x, cur))
 		{
 			free(ret.rgReaderStates);
@@ -728,6 +1003,7 @@ static LONG smartcard_LocateCardsW_Call(scard_call_context* smartcard, wStream* 
 	}
 
 	status = smartcard_pack_locate_cards_return(out, &ret);
+	free(ret.rgReaderStates);
 
 	if (status != SCARD_S_SUCCESS)
 		return status;
@@ -735,8 +1011,9 @@ static LONG smartcard_LocateCardsW_Call(scard_call_context* smartcard, wStream* 
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ReadCacheA_Call(scard_call_context* smartcard, wStream* out,
-                                      SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ReadCacheA_Call(scard_call_context* smartcard,
+                                                           wStream* out,
+                                                           SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	BOOL autoalloc = 0;
@@ -754,7 +1031,7 @@ static LONG smartcard_ReadCacheA_Call(scard_call_context* smartcard, wStream* ou
 	{
 		if (!autoalloc)
 		{
-			ret.pbData = malloc(call->Common.cbDataLen);
+			ret.pbData = calloc(1, call->Common.cbDataLen);
 			if (!ret.pbData)
 				return SCARD_F_INTERNAL_ERROR;
 		}
@@ -790,8 +1067,9 @@ static LONG smartcard_ReadCacheA_Call(scard_call_context* smartcard, wStream* ou
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ReadCacheW_Call(scard_call_context* smartcard, wStream* out,
-                                      SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ReadCacheW_Call(scard_call_context* smartcard,
+                                                           wStream* out,
+                                                           SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	ReadCache_Return ret = WINPR_C_ARRAY_INIT;
@@ -832,9 +1110,9 @@ static LONG smartcard_ReadCacheW_Call(scard_call_context* smartcard, wStream* ou
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_WriteCacheA_Call(scard_call_context* smartcard,
-                                       WINPR_ATTR_UNUSED wStream* out,
-                                       SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_WriteCacheA_Call(scard_call_context* smartcard,
+                                                            WINPR_ATTR_UNUSED wStream* out,
+                                                            SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	WriteCacheA_Call* call = nullptr;
@@ -855,9 +1133,9 @@ static LONG smartcard_WriteCacheA_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_WriteCacheW_Call(scard_call_context* smartcard,
-                                       WINPR_ATTR_UNUSED wStream* out,
-                                       SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_WriteCacheW_Call(scard_call_context* smartcard,
+                                                            WINPR_ATTR_UNUSED wStream* out,
+                                                            SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	WriteCacheW_Call* call = nullptr;
@@ -884,8 +1162,9 @@ static LONG smartcard_WriteCacheW_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_GetTransmitCount_Call(scard_call_context* smartcard, wStream* out,
-                                            SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_GetTransmitCount_Call(scard_call_context* smartcard,
+                                                                 wStream* out,
+                                                                 SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	GetTransmitCount_Return ret = WINPR_C_ARRAY_INIT;
@@ -903,8 +1182,9 @@ static LONG smartcard_GetTransmitCount_Call(scard_call_context* smartcard, wStre
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ReleaseStartedEvent_Call(scard_call_context* smartcard, wStream* out,
-                                               SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_ReleaseStartedEvent_Call(scard_call_context* smartcard,
+                                                                    wStream* out,
+                                                                    SMARTCARD_OPERATION* operation)
 {
 	WINPR_UNUSED(smartcard);
 	WINPR_UNUSED(out);
@@ -916,8 +1196,9 @@ static LONG smartcard_ReleaseStartedEvent_Call(scard_call_context* smartcard, wS
 	return SCARD_E_UNSUPPORTED_FEATURE;
 }
 
-static LONG smartcard_GetReaderIcon_Call(scard_call_context* smartcard, wStream* out,
-                                         SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_GetReaderIcon_Call(scard_call_context* smartcard,
+                                                              wStream* out,
+                                                              SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	GetReaderIcon_Return ret = WINPR_C_ARRAY_INIT;
@@ -944,8 +1225,9 @@ static LONG smartcard_GetReaderIcon_Call(scard_call_context* smartcard, wStream*
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_GetDeviceTypeId_Call(scard_call_context* smartcard, wStream* out,
-                                           SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_GetDeviceTypeId_Call(scard_call_context* smartcard,
+                                                                wStream* out,
+                                                                SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	GetDeviceTypeId_Return ret = WINPR_C_ARRAY_INIT;
@@ -968,6 +1250,7 @@ static LONG smartcard_GetDeviceTypeId_Call(scard_call_context* smartcard, wStrea
 	return ret.ReturnCode;
 }
 
+WINPR_ATTR_NODISCARD
 static BOOL smartcard_context_was_aborted(scard_call_context* smartcard)
 {
 	WINPR_ASSERT(smartcard);
@@ -977,12 +1260,25 @@ static BOOL smartcard_context_was_aborted(scard_call_context* smartcard)
 	return (rc >= WAIT_OBJECT_0) && (rc <= WAIT_OBJECT_0 + ARRAYSIZE(handles));
 }
 
-static LONG smartcard_GetStatusChangeA_Call(scard_call_context* smartcard, wStream* out,
-                                            SMARTCARD_OPERATION* operation)
+/* wait in steps to notice an abort, stopping also cancels the wait */
+#define SCARD_STATUS_CHANGE_STEP_MS 1000
+
+WINPR_ATTR_NODISCARD
+static DWORD smartcard_status_change_step(DWORD dwTimeOut, DWORD waited)
+{
+	if (dwTimeOut == INFINITE)
+		return SCARD_STATUS_CHANGE_STEP_MS;
+	if (waited >= dwTimeOut)
+		return 0;
+	return MIN(dwTimeOut - waited, SCARD_STATUS_CHANGE_STEP_MS);
+}
+
+WINPR_ATTR_NODISCARD static LONG smartcard_GetStatusChangeA_Call(scard_call_context* smartcard,
+                                                                 wStream* out,
+                                                                 SMARTCARD_OPERATION* operation)
 {
 	LONG status = STATUS_NO_MEMORY;
 	DWORD dwTimeOut = 0;
-	const DWORD dwTimeStep = 100;
 	GetStatusChange_Return ret = WINPR_C_ARRAY_INIT;
 	GetStatusChangeA_Call* call = nullptr;
 	LPSCARD_READERSTATEA rgReaderStates = nullptr;
@@ -1005,22 +1301,31 @@ static LONG smartcard_GetStatusChangeA_Call(scard_call_context* smartcard, wStre
 		ret.cReaders = call->cReaders;
 	}
 
-	for (UINT32 x = 0; x < MAX(1, dwTimeOut);)
+	const UINT64 start = GetTickCount64();
+	for (DWORD waited = 0;;)
 	{
+		const DWORD step = smartcard_status_change_step(dwTimeOut, waited);
 		if (call->cReaders > 0)
 			memcpy(rgReaderStates, call->rgReaderStates,
 			       call->cReaders * sizeof(SCARD_READERSTATEA));
-		ret.ReturnCode = wrap(smartcard, SCardGetStatusChangeA, operation->hContext,
-		                      MIN(dwTimeOut, dwTimeStep), rgReaderStates, call->cReaders);
+		/* not wrap(), do not log every step */
+		ret.ReturnCode = wrap_raw(smartcard, SCardGetStatusChangeA, operation->hContext, step,
+		                          rgReaderStates, call->cReaders);
 		if (ret.ReturnCode != SCARD_E_TIMEOUT)
 			break;
+		if (dwTimeOut != INFINITE)
+		{
+			/* the time really waited, each step also costs a pcscd round trip */
+			waited = (DWORD)MIN(GetTickCount64() - start, dwTimeOut);
+			if (waited >= dwTimeOut)
+				break;
+		}
 		if (smartcard_context_was_aborted(smartcard))
 			break;
-		if (dwTimeOut != INFINITE)
-			x += dwTimeStep;
 	}
 	scard_log_status_error_wlog(smartcard->log, "SCardGetStatusChangeA", ret.ReturnCode);
 
+	status = SCARD_E_INVALID_ATR;
 	for (UINT32 index = 0; index < ret.cReaders; index++)
 	{
 		const SCARD_READERSTATEA* cur = &rgReaderStates[index];
@@ -1043,12 +1348,12 @@ fail:
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_GetStatusChangeW_Call(scard_call_context* smartcard, wStream* out,
-                                            SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_GetStatusChangeW_Call(scard_call_context* smartcard,
+                                                                 wStream* out,
+                                                                 SMARTCARD_OPERATION* operation)
 {
 	LONG status = STATUS_NO_MEMORY;
 	DWORD dwTimeOut = 0;
-	const DWORD dwTimeStep = 100;
 	GetStatusChange_Return ret = WINPR_C_ARRAY_INIT;
 	LPSCARD_READERSTATEW rgReaderStates = nullptr;
 
@@ -1070,24 +1375,31 @@ static LONG smartcard_GetStatusChangeW_Call(scard_call_context* smartcard, wStre
 		ret.cReaders = call->cReaders;
 	}
 
-	for (UINT32 x = 0; x < MAX(1, dwTimeOut);)
+	const UINT64 start = GetTickCount64();
+	for (DWORD waited = 0;;)
 	{
+		const DWORD step = smartcard_status_change_step(dwTimeOut, waited);
 		if (call->cReaders > 0)
 			memcpy(rgReaderStates, call->rgReaderStates,
 			       call->cReaders * sizeof(SCARD_READERSTATEW));
-		{
-			ret.ReturnCode = wrap(smartcard, SCardGetStatusChangeW, operation->hContext,
-			                      MIN(dwTimeOut, dwTimeStep), rgReaderStates, call->cReaders);
-		}
+		/* not wrap(), do not log every step */
+		ret.ReturnCode = wrap_raw(smartcard, SCardGetStatusChangeW, operation->hContext, step,
+		                          rgReaderStates, call->cReaders);
 		if (ret.ReturnCode != SCARD_E_TIMEOUT)
 			break;
+		if (dwTimeOut != INFINITE)
+		{
+			/* the time really waited, each step also costs a pcscd round trip */
+			waited = (DWORD)MIN(GetTickCount64() - start, dwTimeOut);
+			if (waited >= dwTimeOut)
+				break;
+		}
 		if (smartcard_context_was_aborted(smartcard))
 			break;
-		if (dwTimeOut != INFINITE)
-			x += dwTimeStep;
 	}
 	scard_log_status_error_wlog(smartcard->log, "SCardGetStatusChangeW", ret.ReturnCode);
 
+	status = SCARD_E_INVALID_ATR;
 	for (UINT32 index = 0; index < ret.cReaders; index++)
 	{
 		const SCARD_READERSTATEW* cur = &rgReaderStates[index];
@@ -1110,8 +1422,9 @@ fail:
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_Cancel_Call(scard_call_context* smartcard, WINPR_ATTR_UNUSED wStream* out,
-                                  SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_Cancel_Call(scard_call_context* smartcard,
+                                                       WINPR_ATTR_UNUSED wStream* out,
+                                                       SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 
@@ -1125,8 +1438,8 @@ static LONG smartcard_Cancel_Call(scard_call_context* smartcard, WINPR_ATTR_UNUS
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_ConnectA_Call(scard_call_context* smartcard, wStream* out,
-                                    SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_ConnectA_Call(scard_call_context* smartcard, wStream* out, SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	SCARDHANDLE hCard = 0;
@@ -1161,8 +1474,8 @@ out_fail:
 	return status;
 }
 
-static LONG smartcard_ConnectW_Call(scard_call_context* smartcard, wStream* out,
-                                    SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_ConnectW_Call(scard_call_context* smartcard, wStream* out, SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	SCARDHANDLE hCard = 0;
@@ -1197,8 +1510,9 @@ out_fail:
 	return status;
 }
 
-static LONG smartcard_Reconnect_Call(scard_call_context* smartcard, wStream* out,
-                                     SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_Reconnect_Call(scard_call_context* smartcard,
+                                                          wStream* out,
+                                                          SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	Reconnect_Return ret = WINPR_C_ARRAY_INIT;
@@ -1220,8 +1534,9 @@ static LONG smartcard_Reconnect_Call(scard_call_context* smartcard, wStream* out
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_Disconnect_Call(scard_call_context* smartcard, WINPR_ATTR_UNUSED wStream* out,
-                                      SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_Disconnect_Call(scard_call_context* smartcard,
+                                                           WINPR_ATTR_UNUSED wStream* out,
+                                                           SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	HCardAndDisposition_Call* call = nullptr;
@@ -1239,9 +1554,9 @@ static LONG smartcard_Disconnect_Call(scard_call_context* smartcard, WINPR_ATTR_
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_BeginTransaction_Call(scard_call_context* smartcard,
-                                            WINPR_ATTR_UNUSED wStream* out,
-                                            SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_BeginTransaction_Call(scard_call_context* smartcard,
+                                                                 WINPR_ATTR_UNUSED wStream* out,
+                                                                 SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 
@@ -1255,9 +1570,9 @@ static LONG smartcard_BeginTransaction_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_EndTransaction_Call(scard_call_context* smartcard,
-                                          WINPR_ATTR_UNUSED wStream* out,
-                                          SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_EndTransaction_Call(scard_call_context* smartcard,
+                                                               WINPR_ATTR_UNUSED wStream* out,
+                                                               SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	HCardAndDisposition_Call* call = nullptr;
@@ -1274,8 +1589,8 @@ static LONG smartcard_EndTransaction_Call(scard_call_context* smartcard,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_State_Call(scard_call_context* smartcard, wStream* out,
-                                 SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_State_Call(scard_call_context* smartcard, wStream* out,
+                                                      SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	State_Return ret = WINPR_C_ARRAY_INIT;
@@ -1296,8 +1611,8 @@ static LONG smartcard_State_Call(scard_call_context* smartcard, wStream* out,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_StatusA_Call(scard_call_context* smartcard, wStream* out,
-                                   SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_StatusA_Call(scard_call_context* smartcard, wStream* out,
+                                                        SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	Status_Return ret = WINPR_C_ARRAY_INIT;
@@ -1350,8 +1665,8 @@ static LONG smartcard_StatusA_Call(scard_call_context* smartcard, wStream* out,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_StatusW_Call(scard_call_context* smartcard, wStream* out,
-                                   SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_StatusW_Call(scard_call_context* smartcard, wStream* out,
+                                                        SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	Status_Return ret = WINPR_C_ARRAY_INIT;
@@ -1412,8 +1727,8 @@ static LONG smartcard_StatusW_Call(scard_call_context* smartcard, wStream* out,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_Transmit_Call(scard_call_context* smartcard, wStream* out,
-                                    SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG
+smartcard_Transmit_Call(scard_call_context* smartcard, wStream* out, SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	Transmit_Return ret = WINPR_C_ARRAY_INIT;
@@ -1433,7 +1748,7 @@ static LONG smartcard_Transmit_Call(scard_call_context* smartcard, wStream* out,
 			call->cbRecvLength = 66560;
 
 		const UINT32 cbRecvLength = call->cbRecvLength;
-		ret.pbRecvBuffer = (BYTE*)malloc(cbRecvLength);
+		ret.pbRecvBuffer = (BYTE*)calloc(1, cbRecvLength);
 
 		if (!ret.pbRecvBuffer)
 			return STATUS_NO_MEMORY;
@@ -1455,8 +1770,8 @@ static LONG smartcard_Transmit_Call(scard_call_context* smartcard, wStream* out,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_Control_Call(scard_call_context* smartcard, wStream* out,
-                                   SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_Control_Call(scard_call_context* smartcard, wStream* out,
+                                                        SMARTCARD_OPERATION* operation)
 {
 	LONG status = 0;
 	Control_Return ret = WINPR_C_ARRAY_INIT;
@@ -1467,7 +1782,7 @@ static LONG smartcard_Control_Call(scard_call_context* smartcard, wStream* out,
 	WINPR_ASSERT(operation);
 
 	call = &operation->call.control;
-	ret.pvOutBuffer = (BYTE*)malloc(call->cbOutBufferSize);
+	ret.pvOutBuffer = (BYTE*)calloc(1, call->cbOutBufferSize);
 
 	if (!ret.pvOutBuffer)
 		return SCARD_E_NO_MEMORY;
@@ -1485,8 +1800,9 @@ static LONG smartcard_Control_Call(scard_call_context* smartcard, wStream* out,
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_GetAttrib_Call(scard_call_context* smartcard, wStream* out,
-                                     SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_GetAttrib_Call(scard_call_context* smartcard,
+                                                          wStream* out,
+                                                          SMARTCARD_OPERATION* operation)
 {
 	BOOL autoAllocate = FALSE;
 	LONG status = 0;
@@ -1506,7 +1822,7 @@ static LONG smartcard_GetAttrib_Call(scard_call_context* smartcard, wStream* out
 		cbAttrLen = call->cbAttrLen;
 		if (cbAttrLen && !autoAllocate)
 		{
-			ret.pbAttr = (BYTE*)malloc(cbAttrLen);
+			ret.pbAttr = (BYTE*)calloc(1, cbAttrLen);
 
 			if (!ret.pbAttr)
 				return SCARD_E_NO_MEMORY;
@@ -1532,8 +1848,9 @@ static LONG smartcard_GetAttrib_Call(scard_call_context* smartcard, wStream* out
 	return status;
 }
 
-static LONG smartcard_SetAttrib_Call(scard_call_context* smartcard, WINPR_ATTR_UNUSED wStream* out,
-                                     SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_SetAttrib_Call(scard_call_context* smartcard,
+                                                          WINPR_ATTR_UNUSED wStream* out,
+                                                          SMARTCARD_OPERATION* operation)
 {
 	Long_Return ret = WINPR_C_ARRAY_INIT;
 	SetAttrib_Call* call = nullptr;
@@ -1552,9 +1869,9 @@ static LONG smartcard_SetAttrib_Call(scard_call_context* smartcard, WINPR_ATTR_U
 	return ret.ReturnCode;
 }
 
-static LONG smartcard_AccessStartedEvent_Call(scard_call_context* smartcard,
-                                              WINPR_ATTR_UNUSED wStream* out,
-                                              SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_AccessStartedEvent_Call(scard_call_context* smartcard,
+                                                                   WINPR_ATTR_UNUSED wStream* out,
+                                                                   SMARTCARD_OPERATION* operation)
 {
 	LONG status = SCARD_S_SUCCESS;
 
@@ -1571,31 +1888,40 @@ static LONG smartcard_AccessStartedEvent_Call(scard_call_context* smartcard,
 	return status;
 }
 
-static LONG smartcard_LocateCardsByATRA_Call(scard_call_context* smartcard, wStream* out,
-                                             SMARTCARD_OPERATION* operation)
+WINPR_ATTR_NODISCARD static LONG smartcard_LocateCardsByATRA_Call(scard_call_context* smartcard,
+                                                                  wStream* out,
+                                                                  SMARTCARD_OPERATION* operation)
 {
-	LONG status = 0;
+	LONG status = SCARD_E_INVALID_HANDLE;
 	GetStatusChange_Return ret = WINPR_C_ARRAY_INIT;
-	LPSCARD_READERSTATEA states = nullptr;
-	LocateCardsByATRA_Call* call = nullptr;
 
 	WINPR_ASSERT(smartcard);
 	WINPR_ASSERT(operation);
 
-	call = &operation->call.locateCardsByATRA;
-	states = (LPSCARD_READERSTATEA)calloc(call->cReaders, sizeof(SCARD_READERSTATEA));
+	LocateCardsByATRA_Call* call = &operation->call.locateCardsByATRA;
+	LPSCARD_READERSTATEA states =
+	    (LPSCARD_READERSTATEA)calloc(call->cReaders, sizeof(SCARD_READERSTATEA));
 
 	if (!states)
 		return STATUS_NO_MEMORY;
 
 	for (UINT32 i = 0; i < call->cReaders; i++)
 	{
+		const LPSCARD_READERSTATEA cstate = &call->rgReaderStates[i];
 		LPSCARD_READERSTATEA state = &states[i];
-		state->szReader = call->rgReaderStates[i].szReader;
-		state->dwCurrentState = call->rgReaderStates[i].dwCurrentState;
-		state->dwEventState = call->rgReaderStates[i].dwEventState;
-		state->cbAtr = call->rgReaderStates[i].cbAtr;
-		CopyMemory(&(state->rgbAtr), &(call->rgReaderStates[i].rgbAtr), 36);
+
+		state->szReader = cstate->szReader;
+		state->dwCurrentState = cstate->dwCurrentState;
+		state->dwEventState = cstate->dwEventState;
+		state->cbAtr = cstate->cbAtr;
+
+		if (state->cbAtr > sizeof(state->rgbAtr))
+		{
+			WLog_WARN(SCARD_TAG, "[%" PRIu32 "] val->cbAtr=%" PRIu32 ", max=%" PRIuz, i,
+			          state->cbAtr, sizeof(state->rgbAtr));
+			goto fail;
+		}
+		CopyMemory(&(state->rgbAtr), &(cstate->rgbAtr), sizeof(cstate->rgbAtr));
 	}
 
 	status = ret.ReturnCode = wrap(smartcard, SCardGetStatusChangeA, operation->hContext,
@@ -1606,10 +1932,11 @@ static LONG smartcard_LocateCardsByATRA_Call(scard_call_context* smartcard, wStr
 	{
 		for (UINT32 j = 0; j < call->cReaders; j++)
 		{
-			for (UINT32 k = 0; k < call->rgAtrMasks[i].cbAtr; k++)
+			const LocateCards_ATRMask* mask = &call->rgAtrMasks[i];
+			for (UINT32 k = 0; k < winpr_Data_Get_UINT32(&mask->cbAtr); k++)
 			{
-				if ((call->rgAtrMasks[i].rgbAtr[k] & call->rgAtrMasks[i].rgbMask[k]) !=
-				    (states[j].rgbAtr[k] & call->rgAtrMasks[i].rgbMask[k]))
+				if ((mask->rgbAtr[k] & mask->rgbMask[k]) !=
+				    (states[j].rgbAtr[k] & mask->rgbMask[k]))
 				{
 					break;
 				}
@@ -1627,15 +1954,16 @@ static LONG smartcard_LocateCardsByATRA_Call(scard_call_context* smartcard, wStr
 
 	if (!ret.rgReaderStates)
 	{
-		free(states);
-		return STATUS_NO_MEMORY;
+		status = STATUS_NO_MEMORY;
+		goto fail;
 	}
 
 	ret.cReaders = call->cReaders;
 
+	status = SCARD_E_INVALID_ATR;
 	for (UINT32 i = 0; i < ret.cReaders; i++)
 	{
-		LPSCARD_READERSTATEA state = &states[i];
+		const LPSCARD_READERSTATEA state = &states[i];
 		ReaderState_Return* cur = &ret.rgReaderStates[i];
 
 		cur->dwCurrentState = state->dwCurrentState;
@@ -1644,17 +1972,110 @@ static LONG smartcard_LocateCardsByATRA_Call(scard_call_context* smartcard, wStr
 		CopyMemory(&(cur->rgbAtr), &(state->rgbAtr), sizeof(cur->rgbAtr));
 
 		if (!smartcard_reader_state_return_is_valid(i, cur))
-		{
-			free(states);
-			free(ret.rgReaderStates);
-			return SCARD_E_INVALID_ATR;
-		}
+			goto fail;
 	}
-
-	free(states);
 
 	status = smartcard_pack_get_status_change_return(out, &ret, FALSE);
 
+fail:
+	free(states);
+	free(ret.rgReaderStates);
+	if (status != SCARD_S_SUCCESS)
+		return status;
+	return ret.ReturnCode;
+}
+
+WINPR_ATTR_NODISCARD static LONG smartcard_LocateCardsByATRW_Call(scard_call_context* smartcard,
+                                                                  wStream* out,
+                                                                  SMARTCARD_OPERATION* operation)
+{
+	LONG status = SCARD_E_INVALID_HANDLE;
+	GetStatusChange_Return ret = WINPR_C_ARRAY_INIT;
+
+	WINPR_ASSERT(smartcard);
+	WINPR_ASSERT(operation);
+
+	LocateCardsByATRW_Call* call = &operation->call.locateCardsByATRW;
+	LPSCARD_READERSTATEW states =
+	    (LPSCARD_READERSTATEW)calloc(call->cReaders, sizeof(SCARD_READERSTATEW));
+
+	if (!states)
+		return STATUS_NO_MEMORY;
+
+	for (UINT32 i = 0; i < call->cReaders; i++)
+	{
+		const LPSCARD_READERSTATEW cstate = &call->rgReaderStates[i];
+		LPSCARD_READERSTATEW state = &states[i];
+
+		state->szReader = cstate->szReader;
+		state->dwCurrentState = cstate->dwCurrentState;
+		state->dwEventState = cstate->dwEventState;
+		state->cbAtr = cstate->cbAtr;
+
+		if (state->cbAtr > sizeof(state->rgbAtr))
+		{
+			WLog_WARN(SCARD_TAG, "[%" PRIu32 "] val->cbAtr=%" PRIu32 ", max=%" PRIuz, i,
+			          state->cbAtr, sizeof(state->rgbAtr));
+			goto fail;
+		}
+		CopyMemory(&(state->rgbAtr), &(cstate->rgbAtr), sizeof(cstate->rgbAtr));
+	}
+
+	status = ret.ReturnCode = wrap(smartcard, SCardGetStatusChangeW, operation->hContext,
+	                               0x000001F4, states, call->cReaders);
+
+	scard_log_status_error_wlog(smartcard->log, "SCardGetStatusChangeW", status);
+	for (UINT32 i = 0; i < call->cAtrs; i++)
+	{
+		for (UINT32 j = 0; j < call->cReaders; j++)
+		{
+			const LocateCards_ATRMask* mask = &call->rgAtrMasks[i];
+			for (UINT32 k = 0; k < winpr_Data_Get_UINT32(&mask->cbAtr); k++)
+			{
+				if ((mask->rgbAtr[k] & mask->rgbMask[k]) !=
+				    (states[j].rgbAtr[k] & mask->rgbMask[k]))
+				{
+					break;
+				}
+
+				states[j].dwEventState |= SCARD_STATE_ATRMATCH;
+			}
+		}
+	}
+
+	ret.rgReaderStates = nullptr;
+
+	if (call->cReaders > 0)
+		ret.rgReaderStates =
+		    (ReaderState_Return*)calloc(call->cReaders, sizeof(ReaderState_Return));
+
+	if (!ret.rgReaderStates)
+	{
+		status = STATUS_NO_MEMORY;
+		goto fail;
+	}
+
+	ret.cReaders = call->cReaders;
+
+	status = SCARD_E_INVALID_ATR;
+	for (UINT32 i = 0; i < ret.cReaders; i++)
+	{
+		const LPSCARD_READERSTATEW state = &states[i];
+		ReaderState_Return* cur = &ret.rgReaderStates[i];
+
+		cur->dwCurrentState = state->dwCurrentState;
+		cur->dwEventState = state->dwEventState;
+		cur->cbAtr = state->cbAtr;
+		CopyMemory(&(cur->rgbAtr), &(state->rgbAtr), sizeof(cur->rgbAtr));
+
+		if (!smartcard_reader_state_return_is_valid(i, cur))
+			goto fail;
+	}
+
+	status = smartcard_pack_get_status_change_return(out, &ret, FALSE);
+
+fail:
+	free(states);
 	free(ret.rgReaderStates);
 	if (status != SCARD_S_SUCCESS)
 		return status;
@@ -1681,8 +2102,7 @@ LONG smartcard_irp_device_control_call(scard_call_context* ctx, wStream* out, NT
 	 * Since it's a SHOULD and not a MUST, we don't care
 	 * about it, but we still reserve at least 2048 bytes.
 	 */
-	const size_t outMaxLen = MAX(2048, operation->outputBufferLength);
-	if (!Stream_EnsureRemainingCapacity(out, outMaxLen))
+	if (!Stream_EnsureRemainingCapacity(out, 2048ull))
 		return SCARD_E_NO_MEMORY;
 
 	/* Device Control Response */
@@ -1690,6 +2110,8 @@ LONG smartcard_irp_device_control_call(scard_call_context* ctx, wStream* out, NT
 	Stream_Zero(out, SMARTCARD_COMMON_TYPE_HEADER_LENGTH);  /* CommonTypeHeader (8 bytes) */
 	Stream_Zero(out, SMARTCARD_PRIVATE_TYPE_HEADER_LENGTH); /* PrivateTypeHeader (8 bytes) */
 	Stream_Write_UINT32(out, 0);                            /* Result (4 bytes) */
+
+	smartcard_handle_activity_begin(ctx, ioControlCode, operation->hCard);
 
 	/* Call */
 	switch (ioControlCode)
@@ -1851,7 +2273,7 @@ LONG smartcard_irp_device_control_call(scard_call_context* ctx, wStream* out, NT
 			break;
 
 		case SCARD_IOCTL_LOCATECARDSBYATRW:
-			result = smartcard_LocateCardsW_Call(ctx, out, operation);
+			result = smartcard_LocateCardsByATRW_Call(ctx, out, operation);
 			break;
 
 		case SCARD_IOCTL_READCACHEA:
@@ -1889,6 +2311,17 @@ LONG smartcard_irp_device_control_call(scard_call_context* ctx, wStream* out, NT
 		default:
 			result = STATUS_UNSUCCESSFUL;
 			break;
+	}
+
+	if (smartcard_handle_activity_end(ctx, ioControlCode, operation->hCard, result))
+	{
+		WLog_Print(ctx->log, WLOG_WARN,
+		           "transaction on hCard 0x%08" PRIxz
+		           " granted after the server ended it, releasing it",
+		           (size_t)operation->hCard);
+		const LONG rc = wrap(ctx, SCardEndTransaction, operation->hCard, SCARD_LEAVE_CARD);
+		scard_log_status_error_wlog(ctx->log, "SCardEndTransaction", rc);
+		result = SCARD_E_CANCELLED;
 	}
 
 	/**
@@ -2075,6 +2508,12 @@ scard_call_context* smartcard_call_context_new_with_context(rdpContext* context)
 		obj->fnObjectFree = context_free;
 	}
 
+	if (!smartcard_transaction_watchdog_start(ctx))
+	{
+		WLog_Print(ctx->log, WLOG_ERROR, "Failed to start idle transaction watchdog!");
+		goto fail;
+	}
+
 	return ctx;
 fail:
 	WINPR_PRAGMA_DIAG_PUSH
@@ -2090,6 +2529,9 @@ void smartcard_call_context_free(scard_call_context* ctx)
 		return;
 
 	smartcard_call_context_signal_stop(ctx, FALSE);
+
+	/* uses the WinSCard API */
+	smartcard_transaction_watchdog_stop(ctx);
 
 	LinkedList_Free(ctx->names);
 	if (ctx->StartedEvent)
@@ -2119,6 +2561,7 @@ void smartcard_call_context_free(scard_call_context* ctx)
 	ctx->pWinSCardApi = nullptr;
 
 	HashTable_Free(ctx->rgSCardContextList);
+	HashTable_Free(ctx->handleStates);
 	(void)CloseHandle(ctx->stopEvent);
 	free(ctx);
 }
@@ -2189,6 +2632,17 @@ BOOL smartcard_call_is_configured(scard_call_context* ctx)
 	return FALSE;
 }
 
+static BOOL smartcard_cancel_context_wait(const void* key, WINPR_ATTR_UNUSED void* value, void* arg)
+{
+	scard_call_context* ctx = arg;
+	WINPR_ASSERT(ctx);
+
+	const LONG rc = wrap_raw(ctx, SCardCancel, (SCARDCONTEXT)key);
+	if (rc != SCARD_S_SUCCESS)
+		WLog_Print(ctx->log, WLOG_DEBUG, "SCardCancel failed with %s", SCardGetErrorString(rc));
+	return TRUE;
+}
+
 BOOL smartcard_call_context_signal_stop(scard_call_context* ctx, BOOL reset)
 {
 	WINPR_ASSERT(ctx);
@@ -2198,6 +2652,12 @@ BOOL smartcard_call_context_signal_stop(scard_call_context* ctx, BOOL reset)
 
 	if (reset)
 		return ResetEvent(ctx->stopEvent);
-	else
-		return SetEvent(ctx->stopEvent);
+
+	if (!SetEvent(ctx->stopEvent))
+		return FALSE;
+
+	/* end pending SCardGetStatusChange calls */
+	if (ctx->rgSCardContextList && (ctx->useEmulatedCard || ctx->pWinSCardApi))
+		return HashTable_Foreach(ctx->rgSCardContextList, smartcard_cancel_context_wait, ctx);
+	return TRUE;
 }

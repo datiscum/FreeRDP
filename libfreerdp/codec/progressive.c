@@ -365,23 +365,23 @@ static inline RFX_PROGRESSIVE_TILE* progressive_tile_new(void)
 
 	{
 		const size_t dataLen = 1ull * tile->stride * tile->height;
-		tile->data = (BYTE*)winpr_aligned_malloc(dataLen, 16);
+		tile->data = (BYTE*)winpr_aligned_calloc(tile->stride, tile->height, 16);
 		if (!tile->data)
 			goto fail;
 		memset(tile->data, 0xFF, dataLen);
 	}
 
 	{
-		const size_t signLen = (8192ULL + 32ULL) * 3ULL;
-		tile->sign = (BYTE*)winpr_aligned_malloc(signLen, 16);
+		const size_t signLen = (8192ULL + 32ULL);
+		tile->sign = (BYTE*)winpr_aligned_calloc(3, signLen, 16);
 	}
 
 	if (!tile->sign)
 		goto fail;
 
 	{
-		const size_t currentLen = (8192ULL + 32ULL) * 3ULL;
-		tile->current = (BYTE*)winpr_aligned_malloc(currentLen, 16);
+		const size_t currentLen = (8192ULL + 32ULL);
+		tile->current = (BYTE*)winpr_aligned_calloc(3, currentLen, 16);
 	}
 	if (!tile->current)
 		goto fail;
@@ -876,7 +876,8 @@ progressive_rfx_decode_component(PROGRESSIVE_CONTEXT* WINPR_RESTRICT progressive
 	CopyMemory(sign, buffer, 4096ULL * 2ULL);
 	if (!extrapolate)
 	{
-		rfx_differential_decode(buffer + 4032, 64);
+		if (!rfx_differential_decode(buffer + 4032, 64))
+			return -1;
 		if (!progressive_rfx_decode_block(prims, &buffer[0], 1024, shift->HL1)) /* HL1 */
 			return -1;
 		if (!progressive_rfx_decode_block(prims, &buffer[1024], 1024, shift->LH1)) /* LH1 */
@@ -918,7 +919,8 @@ progressive_rfx_decode_component(PROGRESSIVE_CONTEXT* WINPR_RESTRICT progressive
 			return -1;
 		if (!progressive_rfx_decode_block(prims, &buffer[3951], 64, shift->HH3)) /* HH3 */
 			return -1;
-		rfx_differential_decode(&buffer[4015], 81);                           /* LL3 */
+		if (!rfx_differential_decode(&buffer[4015], 81)) /* LL3 */
+			return -1;
 		if (!progressive_rfx_decode_block(prims, &buffer[4015], 81, shift->LL3)) /* LL3 */
 			return -1;
 	}
@@ -1034,18 +1036,27 @@ progressive_decompress_tile_first(PROGRESSIVE_CONTEXT* WINPR_RESTRICT progressiv
 	if (!progressive_rfx_quant_lsub(&shiftCr, 1)) /* -6 + 5 = -1 */
 		goto fail;
 
-	pSign[0] = (INT16*)((&tile->sign[((8192 + 32) * 0) + 16])); /* Y/R buffer */
-	pSign[1] = (INT16*)((&tile->sign[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
-	pSign[2] = (INT16*)((&tile->sign[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
+	pSign[0] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->sign[((8192 + 32) * 0) + 16])); /* Y/R buffer */
+	pSign[1] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->sign[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
+	pSign[2] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->sign[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
 
-	pCurrent[0] = (INT16*)((&tile->current[((8192 + 32) * 0) + 16])); /* Y/R buffer */
-	pCurrent[1] = (INT16*)((&tile->current[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
-	pCurrent[2] = (INT16*)((&tile->current[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
+	pCurrent[0] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->current[((8192 + 32) * 0) + 16])); /* Y/R buffer */
+	pCurrent[1] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->current[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
+	pCurrent[2] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->current[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
 
 	pBuffer = (BYTE*)BufferPool_Take(progressive->bufferPool, -1);
-	pSrcDst[0] = (INT16*)((&pBuffer[((8192 + 32) * 0) + 16])); /* Y/R buffer */
-	pSrcDst[1] = (INT16*)((&pBuffer[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
-	pSrcDst[2] = (INT16*)((&pBuffer[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
+	pSrcDst[0] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&pBuffer[((8192 + 32) * 0) + 16])); /* Y/R buffer */
+	pSrcDst[1] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&pBuffer[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
+	pSrcDst[2] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&pBuffer[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
 
 	rc = progressive_rfx_decode_component(progressive, &shiftY, tile->yData, tile->yLen, pSrcDst[0],
 	                                      pCurrent[0], pSign[0], diff, sub, extrapolate); /* Y */
@@ -1465,18 +1476,27 @@ progressive_decompress_tile_upgrade(PROGRESSIVE_CONTEXT* WINPR_RESTRICT progress
 	tile->cbProgQuant = *quantProgCb;
 	tile->crProgQuant = *quantProgCr;
 
-	pSign[0] = (INT16*)((&tile->sign[((8192 + 32) * 0) + 16])); /* Y/R buffer */
-	pSign[1] = (INT16*)((&tile->sign[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
-	pSign[2] = (INT16*)((&tile->sign[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
+	pSign[0] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->sign[((8192 + 32) * 0) + 16])); /* Y/R buffer */
+	pSign[1] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->sign[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
+	pSign[2] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->sign[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
 
-	pCurrent[0] = (INT16*)((&tile->current[((8192 + 32) * 0) + 16])); /* Y/R buffer */
-	pCurrent[1] = (INT16*)((&tile->current[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
-	pCurrent[2] = (INT16*)((&tile->current[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
+	pCurrent[0] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->current[((8192 + 32) * 0) + 16])); /* Y/R buffer */
+	pCurrent[1] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->current[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
+	pCurrent[2] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&tile->current[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
 
 	pBuffer = (BYTE*)BufferPool_Take(progressive->bufferPool, -1);
-	pSrcDst[0] = (INT16*)((&pBuffer[((8192 + 32) * 0) + 16])); /* Y/R buffer */
-	pSrcDst[1] = (INT16*)((&pBuffer[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
-	pSrcDst[2] = (INT16*)((&pBuffer[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
+	pSrcDst[0] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&pBuffer[((8192 + 32) * 0) + 16])); /* Y/R buffer */
+	pSrcDst[1] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&pBuffer[((8192 + 32) * 1) + 16])); /* Cb/G buffer */
+	pSrcDst[2] =
+	    WINPR_PACKED_ALIGN_CAST(INT16*, (&pBuffer[((8192 + 32) * 2) + 16])); /* Cr/B buffer */
 
 	status = progressive_rfx_upgrade_component(progressive, &shiftY, quantProgY, &yNumBits,
 	                                           pSrcDst[0], pCurrent[0], pSign[0], tile->ySrlData,

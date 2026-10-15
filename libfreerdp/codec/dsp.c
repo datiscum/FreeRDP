@@ -36,6 +36,10 @@
 #include "dsp_fdk_aac.h"
 #endif
 
+#if defined(WITH_MEDIACODEC)
+#include "dsp_mediacodec.h"
+#endif
+
 #if !defined(WITH_DSP_FFMPEG)
 #if defined(WITH_GSM)
 #include <gsm/gsm.h>
@@ -235,16 +239,6 @@ static BOOL freerdp_dsp_resample(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                                  const AUDIO_FORMAT* WINPR_RESTRICT srcFormat,
                                  const BYTE** WINPR_RESTRICT data, size_t* WINPR_RESTRICT length)
 {
-#if defined(WITH_SOXR)
-	soxr_error_t error;
-	size_t idone, odone;
-	size_t sframes, rframes;
-	size_t rsize;
-	size_t sbytes, rbytes;
-	size_t dstChannels;
-	size_t srcChannels;
-	size_t srcBytesPerFrame, dstBytesPerFrame;
-#endif
 	AUDIO_FORMAT format;
 
 	if (srcFormat->wFormatTag != WAVE_FORMAT_PCM)
@@ -268,23 +262,25 @@ static BOOL freerdp_dsp_resample(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 	}
 
 #if defined(WITH_SOXR)
-	srcBytesPerFrame = (srcFormat->wBitsPerSample > 8) ? 2 : 1;
-	dstBytesPerFrame = (context->common.format.wBitsPerSample > 8) ? 2 : 1;
-	srcChannels = srcFormat->nChannels;
-	dstChannels = context->common.format.nChannels;
-	sbytes = srcChannels * srcBytesPerFrame;
-	sframes = size / sbytes;
-	rbytes = dstBytesPerFrame * dstChannels;
+	const size_t srcBytesPerFrame = (srcFormat->wBitsPerSample > 8) ? 2 : 1;
+	const size_t dstBytesPerFrame = (context->common.format.wBitsPerSample > 8) ? 2 : 1;
+	const size_t srcChannels = srcFormat->nChannels;
+	const size_t dstChannels = context->common.format.nChannels;
+	const size_t sbytes = srcChannels * srcBytesPerFrame;
+	const size_t sframes = size / sbytes;
+	const size_t rbytes = dstBytesPerFrame * dstChannels;
 	/* Integer rounding correct division */
-	rframes =
+	const size_t rframes =
 	    (sframes * context->common.format.nSamplesPerSec + (srcFormat->nSamplesPerSec + 1) / 2) /
 	    srcFormat->nSamplesPerSec;
-	rsize = rframes * rbytes;
+	const size_t rsize = rframes * rbytes;
 
 	if (!Stream_EnsureCapacity(context->common.resample, rsize))
 		return FALSE;
 
-	error =
+	size_t idone = 0;
+	size_t odone = 0;
+	soxr_error_t error =
 	    soxr_process(context->sox, src, sframes, &idone, Stream_Buffer(context->common.resample),
 	                 Stream_Capacity(context->common.resample) / rbytes, &odone);
 	if (!Stream_SetLength(context->common.resample, odone * rbytes))
@@ -292,7 +288,7 @@ static BOOL freerdp_dsp_resample(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 
 	*data = Stream_Buffer(context->common.resample);
 	*length = Stream_Length(context->common.resample);
-	return (error == 0) != 0;
+	return (error == nullptr);
 #else
 	WLog_ERR(TAG, "Missing resample support, recompile -DWITH_SOXR=ON or -DWITH_DSP_FFMPEG=ON");
 	return FALSE;
@@ -501,18 +497,24 @@ static BOOL freerdp_dsp_decode_gsm610(FREERDP_DSP_CONTEXT* WINPR_RESTRICT contex
 
 	while (offset < size)
 	{
-		int rc;
+		/* gsm_decode(GSM_OPT_WAV49) requires alternating fixed 33/32 bytes as input.
+		 * abort if the data supplied was inconsistent.
+		 */
+		const BOOL large = (offset % 65) == 0;
+		const size_t toadd = large ? 33 : 32;
+		if (size - offset < toadd)
+			return FALSE;
+
 		gsm_signal gsmBlockBuffer[160] = WINPR_C_ARRAY_INIT;
-		rc = gsm_decode(context->gsm, (gsm_byte*)/* API does not modify */ &src[offset],
-		                gsmBlockBuffer);
+		const int rc =
+		    gsm_decode(context->gsm,
+		               WINPR_CAST_CONST_PTR_AWAY(/* API does not modify */ &src[offset], gsm_byte*),
+		               gsmBlockBuffer);
 
 		if (rc < 0)
 			return FALSE;
 
-		if ((offset % 65) == 0)
-			offset += 33;
-		else
-			offset += 32;
+		offset += toadd;
 
 		if (!Stream_EnsureRemainingCapacity(out, sizeof(gsmBlockBuffer)))
 			return FALSE;
@@ -531,12 +533,13 @@ static BOOL freerdp_dsp_encode_gsm610(FREERDP_DSP_CONTEXT* WINPR_RESTRICT contex
 
 	while (offset < size)
 	{
-		const gsm_signal* signal = (const gsm_signal*)&src[offset];
+		const gsm_signal* signal = WINPR_PACKED_ALIGN_CAST(const gsm_signal*, &src[offset]);
 
 		if (!Stream_EnsureRemainingCapacity(out, sizeof(gsm_frame)))
 			return FALSE;
 
-		gsm_encode(context->gsm, (gsm_signal*)/* API does not modify */ signal,
+		gsm_encode(context->gsm,
+		           WINPR_CAST_CONST_PTR_AWAY(/* API does not modify */ signal, gsm_signal*),
 		           Stream_Pointer(out));
 
 		if ((offset % 65) == 0)
@@ -575,23 +578,25 @@ static BOOL freerdp_dsp_decode_mp3(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 	if (!valid_mp3_format(context))
 		return FALSE;
 	const size_t buffer_size =
-	    2 * context->common.format.nChannels * context->common.format.nSamplesPerSec;
+	    2ull * context->common.format.nChannels * context->common.format.nSamplesPerSec;
 
-	if (!Stream_EnsureCapacity(context->common.buffer, 2 * buffer_size))
+	if (!Stream_EnsureCapacity(context->common.buffer, 2ull * buffer_size))
 		return FALSE;
 
 	short* pcm_l = Stream_BufferAs(context->common.buffer, short);
-	short* pcm_r = Stream_BufferAs(context->common.buffer, short) + buffer_size;
-	const int rc = hip_decode(context->hip, (unsigned char*)/* API is not modifying content */ src,
-	                          size, pcm_l, pcm_r);
+	short* pcm_r = Stream_BufferAs(context->common.buffer, short) + (buffer_size / sizeof(short));
+	const int rc = hip_decode(
+	    context->hip,
+	    WINPR_CAST_CONST_PTR_AWAY(/* API is not modifying content */ src, unsigned char*), size,
+	    pcm_l, pcm_r);
 
 	if (rc <= 0)
 		return FALSE;
 
-	if (!Stream_EnsureRemainingCapacity(out, (size_t)rc * context->common.format.nChannels * 2))
+	if (!Stream_EnsureRemainingCapacity(out, (size_t)rc * context->common.format.nChannels * 2ull))
 		return FALSE;
 
-	for (size_t x = 0; x < rc; x++)
+	for (int x = 0; x < rc; x++)
 	{
 		Stream_Write_UINT16(out, (UINT16)pcm_l[x]);
 		Stream_Write_UINT16(out, (UINT16)pcm_r[x]);
@@ -614,13 +619,19 @@ static BOOL freerdp_dsp_encode_mp3(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 	    size / context->common.format.nChannels / context->common.format.wBitsPerSample / 8;
 
 	/* Ensure worst case buffer size for mp3 stream taken from LAME header */
-	if (!Stream_EnsureRemainingCapacity(out, 5 / 4 * samples_per_channel + 7200))
+	if (!Stream_EnsureRemainingCapacity(out, 5ull / 4ull * samples_per_channel + 7200ull))
 		return FALSE;
 
 	samples_per_channel = size / 2 /* size of a sample */ / context->common.format.nChannels;
-	const int rc =
-	    lame_encode_buffer_interleaved(context->lame, (short*)src, samples_per_channel,
-	                                   Stream_Pointer(out), Stream_GetRemainingCapacity(out));
+	const size_t outLen = Stream_GetRemainingCapacity(out);
+	if ((outLen > INT_MAX) || (samples_per_channel > INT_MAX))
+		return FALSE;
+
+	const int rc = lame_encode_buffer_interleaved(
+	    context->lame,
+	    WINPR_CAST_CONST_PTR_AWAY(WINPR_PACKED_ALIGN_CAST(const short*, src), short*),
+	    WINPR_ASSERTING_INT_CAST(int, samples_per_channel), Stream_Pointer(out),
+	    WINPR_ASSERTING_INT_CAST(int, outLen));
 
 	if (rc < 0)
 		return FALSE;
@@ -635,16 +646,13 @@ static BOOL freerdp_dsp_encode_faac(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                                     const BYTE* WINPR_RESTRICT src, size_t size,
                                     wStream* WINPR_RESTRICT out)
 {
-	const int16_t* inSamples = (const int16_t*)src;
-	unsigned int bpp;
-	size_t nrSamples;
-	int rc;
+	const int16_t* inSamples = WINPR_PACKED_ALIGN_CAST(const int16_t*, src);
 
 	if (!context || !src || !out)
 		return FALSE;
 
-	bpp = context->common.format.wBitsPerSample / 8;
-	nrSamples = size / bpp;
+	const unsigned int bpp = context->common.format.wBitsPerSample / 8;
+	const size_t nrSamples = size / bpp;
 
 	if (!Stream_EnsureRemainingCapacity(context->common.buffer, nrSamples * sizeof(int16_t)))
 		return FALSE;
@@ -656,9 +664,14 @@ static BOOL freerdp_dsp_encode_faac(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 		{
 			if (!Stream_EnsureRemainingCapacity(out, context->faacMaxOutputBytes))
 				return FALSE;
-			rc = faacEncEncode(context->faac, Stream_BufferAs(context->common.buffer, int32_t),
-			                   context->faacInputSamples, Stream_Pointer(out),
-			                   Stream_GetRemainingCapacity(out));
+
+			const size_t outLen = Stream_GetRemainingCapacity(out);
+			if ((outLen > UINT_MAX) || (context->faacInputSamples > UINT_MAX))
+				return FALSE;
+			const int rc =
+			    faacEncEncode(context->faac, Stream_BufferAs(context->common.buffer, int32_t),
+			                  WINPR_ASSERTING_INT_CAST(unsigned int, context->faacInputSamples),
+			                  Stream_Pointer(out), WINPR_ASSERTING_INT_CAST(unsigned int, outLen));
 			if (rc < 0)
 				return FALSE;
 			if (rc > 0)
@@ -708,14 +721,13 @@ static BOOL freerdp_dsp_encode_opus(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 		return FALSE;
 
 	const size_t src_frames = size / sizeof(opus_int16) / context->common.format.nChannels;
-	const opus_int16* src_data = (const opus_int16*)src;
-	const opus_int32 frames = opus_encode(
+	const opus_int16* src_data = WINPR_PACKED_ALIGN_CAST(const opus_int16*, src);
+	const opus_int32 bytes = opus_encode(
 	    context->opus_encoder, src_data, WINPR_ASSERTING_INT_CAST(opus_int32, src_frames),
 	    Stream_Pointer(out), WINPR_ASSERTING_INT_CAST(opus_int32, max_size));
-	if (frames < 0)
+	if (bytes < 0)
 		return FALSE;
-	return Stream_SafeSeek(out,
-	                       (size_t)frames * context->common.format.nChannels * sizeof(int16_t));
+	return Stream_SafeSeek(out, (size_t)bytes);
 }
 #endif
 
@@ -737,12 +749,12 @@ static BOOL freerdp_dsp_decode_faad(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 			const void* cpv;
 			void* pv;
 		} cnv;
-		unsigned long samplerate;
-		unsigned char channels;
-		long err;
+		unsigned long samplerate = 0;
+		unsigned char channels = 0;
+
 		cnv.cpv = src;
-		err = NeAACDecInit(context->faad, /* API is not modifying content */ cnv.pv, size,
-		                   &samplerate, &channels);
+		const long err = NeAACDecInit(context->faad, /* API is not modifying content */ cnv.pv,
+		                              size, &samplerate, &channels);
 
 		if (err != 0)
 			return FALSE;
@@ -763,15 +775,15 @@ static BOOL freerdp_dsp_decode_faad(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 			const void* cpv;
 			void* pv;
 		} cnv;
-		size_t outSize;
-		void* sample_buffer;
-		outSize = context->common.format.nSamplesPerSec * context->common.format.nChannels *
-		          context->common.format.wBitsPerSample / 8;
+
+		const size_t outSize = context->common.format.nSamplesPerSec *
+		                       context->common.format.nChannels *
+		                       context->common.format.wBitsPerSample / 8;
 
 		if (!Stream_EnsureRemainingCapacity(out, outSize))
 			return FALSE;
 
-		sample_buffer = Stream_Pointer(out);
+		void* sample_buffer = Stream_Pointer(out);
 
 		cnv.cpv = &src[offset];
 		NeAACDecDecode2(context->faad, &info, cnv.pv, size - offset, &sample_buffer,
@@ -882,7 +894,7 @@ static BOOL freerdp_dsp_encode_ima_adpcm(FREERDP_DSP_CONTEXT* WINPR_RESTRICT con
 		return FALSE;
 	if (!Stream_EnsureRemainingCapacity(out, size))
 		return FALSE;
-	if (!Stream_EnsureRemainingCapacity(context->common.buffer, size + 64))
+	if (!Stream_EnsureRemainingCapacity(context->common.buffer, size + 64ull))
 		return FALSE;
 
 	const size_t align = (context->common.format.nChannels > 1) ? 32 : 4;
@@ -1263,9 +1275,8 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_context_new(BOOL encoder)
 		goto fail;
 
 	{
-		int rc;
 		int val = 1;
-		rc = gsm_option(context->gsm, GSM_OPT_WAV49, &val);
+		int rc = gsm_option(context->gsm, GSM_OPT_WAV49, &val);
 
 		if (rc < 0)
 			goto fail;
@@ -1318,6 +1329,10 @@ void freerdp_dsp_context_free(FREERDP_DSP_CONTEXT* context)
 	fdk_aac_dsp_uninit(ctx);
 #endif
 
+#if defined(WITH_MEDIACODEC)
+	mediacodec_aac_dsp_uninit((FREERDP_DSP_COMMON_CONTEXT*)context);
+#endif
+
 #if defined(WITH_DSP_FFMPEG)
 	freerdp_dsp_ffmpeg_context_free(context);
 #else
@@ -1368,6 +1383,12 @@ BOOL freerdp_dsp_encode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                         const BYTE* WINPR_RESTRICT pdata, size_t length,
                         wStream* WINPR_RESTRICT out)
 {
+#if defined(WITH_MEDIACODEC)
+	FREERDP_DSP_COMMON_CONTEXT* mcctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
+	if (mcctx && (mcctx->format.wFormatTag == WAVE_FORMAT_AAC_MS))
+		return mediacodec_aac_dsp_encode(mcctx, srcFormat, pdata, length, out);
+#endif
+
 #if defined(WITH_FDK_AAC)
 	FREERDP_DSP_COMMON_CONTEXT* ctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
 	WINPR_ASSERT(ctx);
@@ -1445,6 +1466,12 @@ BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                         const AUDIO_FORMAT* WINPR_RESTRICT srcFormat,
                         const BYTE* WINPR_RESTRICT data, size_t length, wStream* WINPR_RESTRICT out)
 {
+#if defined(WITH_MEDIACODEC)
+	FREERDP_DSP_COMMON_CONTEXT* mcctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
+	if (mcctx && (mcctx->format.wFormatTag == WAVE_FORMAT_AAC_MS))
+		return mediacodec_aac_dsp_decode(mcctx, srcFormat, data, length, out);
+#endif
+
 #if defined(WITH_FDK_AAC)
 	FREERDP_DSP_COMMON_CONTEXT* ctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
 	WINPR_ASSERT(ctx);
@@ -1508,6 +1535,11 @@ BOOL freerdp_dsp_decode(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 
 BOOL freerdp_dsp_supports_format(const AUDIO_FORMAT* WINPR_RESTRICT format, BOOL encode)
 {
+#if defined(WITH_MEDIACODEC)
+	if (format && (format->wFormatTag == WAVE_FORMAT_AAC_MS))
+		return mediacodec_aac_dsp_supports_format(format, encode);
+#endif
+
 #if defined(WITH_FDK_AAC)
 	switch (format->wFormatTag)
 	{
@@ -1590,6 +1622,19 @@ BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
                                const AUDIO_FORMAT* WINPR_RESTRICT targetFormat,
                                WINPR_ATTR_UNUSED UINT32 FramesPerPacket)
 {
+#if defined(WITH_MEDIACODEC)
+	if (!context || !targetFormat)
+		return FALSE;
+
+	if (targetFormat->wFormatTag == WAVE_FORMAT_AAC_MS)
+	{
+		FREERDP_DSP_COMMON_CONTEXT* ctx = (FREERDP_DSP_COMMON_CONTEXT*)context;
+		mediacodec_aac_dsp_uninit(ctx);
+		ctx->format = *targetFormat;
+		return mediacodec_aac_dsp_init(ctx, FramesPerPacket);
+	}
+#endif
+
 #if defined(WITH_FDK_AAC)
 	WINPR_ASSERT(targetFormat);
 	if (targetFormat->wFormatTag == WAVE_FORMAT_AAC_MS)
