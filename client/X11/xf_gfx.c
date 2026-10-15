@@ -600,9 +600,10 @@ static BOOL xf_vaapi_copy_rows(BYTE* dst, size_t dstPitch, const BYTE* src, size
 	if ((rowBytes == 0) || (height == 0))
 		return FALSE;
 
-	if ((dstPitch == rowBytes) && (srcPitch == rowBytes))
+	if (dstPitch == srcPitch)
 	{
-		memcpy(dst, src, rowBytes * (size_t)height);
+		/* Include inter-row padding, but do not read past the final visible row. */
+		memcpy(dst, src, dstPitch * (size_t)(height - 1) + rowBytes);
 		return TRUE;
 	}
 
@@ -1851,7 +1852,7 @@ static BOOL xf_vaapi_vpp_prepare(VADisplay dpy, UINT32 targetWidth, UINT32 targe
 	}
 
 	const size_t rowBytes = (size_t)targetWidth * 4U;
-	const size_t pitch = xf_vaapi_align_size(rowBytes, 128);
+	const size_t pitch = xf_vaapi_align_size(rowBytes + 16U, 128);
 	if ((pitch == 0) || ((size_t)bufferHeight > (SIZE_MAX / pitch)))
 	{
 		WLog_WARN(TAG,
@@ -3092,6 +3093,11 @@ static UINT xf_CreateSurface(RdpgfxClientContext* context,
 	 * accidentally read out of bound */
 	surface->gdi.scanline = surface->gdi.width * FreeRDPGetBytesPerPixel(surface->gdi.format);
 	surface->gdi.scanline = x11_pad_scanline(surface->gdi.scanline, pad) + 16ul;
+#if defined(WITH_VAAPI) && defined(WITH_X11_VAAPI)
+	/* Match the USER_PTR stride while retaining the SIMD safety bytes. */
+	surface->gdi.scanline = WINPR_ASSERTING_INT_CAST(
+	    UINT32, xf_vaapi_align_size(surface->gdi.scanline, 128));
+#endif
 
 	surface->gdi.data = (BYTE*)winpr_aligned_calloc(surface->gdi.scanline, surface->gdi.height, 16);
 
