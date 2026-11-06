@@ -26,7 +26,7 @@ if(NOT BUILD_TESTING_NO_H264)
 endif()
 
 if(WITH_GFX_AV1)
-  list(APPEND TESTS TestFreeRDPCodecAV1.c)
+  list(APPEND TESTS TestFreeRDPCodecAV1.c TestFreeRDPCodecAV1I444.c)
 endif()
 
 if(BUILD_TESTING_INTERNAL)

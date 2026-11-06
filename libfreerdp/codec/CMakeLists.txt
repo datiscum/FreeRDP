@@ -54,7 +54,7 @@ set(CODEC_SRCS
 if(WITH_GFX_AV1)
   include(WarnExperimental)
   warn_experimental("AV1 codec support for GFX channel" "-DWITH_GFX_AV1=OFF")
-  list(APPEND CODEC_SRCS av1.c)
+  list(APPEND CODEC_SRCS av1.c av1_color.h)
 endif()
 
 set(CODEC_SSE3_SRCS sse/rfx_sse2.c sse/rfx_sse2.h sse/nsc_sse2.c sse/nsc_sse2.h)

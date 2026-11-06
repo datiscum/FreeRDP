@@ -44,6 +44,8 @@
 
 #if defined(WITH_LIBAOM) || defined(WITH_DAV1D)
 
+#include "av1_color.h"
+
 #if defined(WITH_LIBYUV)
 #include <libyuv.h>
 #endif
@@ -82,6 +84,7 @@ struct S_FREERDP_AV1_CONTEXT
 	bool encoder;
 	bool initialized;
 	AV1_BACKEND backend;
+	av1_i444_to_rgb_fn i444ToRGB;
 #if defined(WITH_LIBAOM)
 	aom_codec_ctx_t ctx;
 	aom_codec_enc_cfg_t ecfg;
@@ -559,15 +562,15 @@ static BOOL freerdp_av1_vaapi_convert_frame(FREERDP_AV1_CONTEXT* av1, const AVFr
 
 		case AV_PIX_FMT_YUV444P:
 		case AV_PIX_FMT_YUVJ444P:
+		{
 			pSrc[0] = frame->data[0];
 			pSrc[1] = frame->data[1];
 			pSrc[2] = frame->data[2];
-			strides[0] = (UINT32)MAX(0, frame->linesize[0]);
-			strides[1] = (UINT32)MAX(0, frame->linesize[1]);
-			strides[2] = (UINT32)MAX(0, frame->linesize[2]);
-			rc = primitives->YUV444ToRGB_8u_P3AC4R(pSrc, strides, pDstData, nDstStep, DstFormat,
-			                                       &roi);
+			const ptrdiff_t nativeStrides[3] = { frame->linesize[0], frame->linesize[1],
+				                                 frame->linesize[2] };
+			rc = av1->i444ToRGB(pSrc, nativeStrides, pDstData, nDstStep, DstFormat, &roi);
 			break;
+		}
 
 		case AV_PIX_FMT_NV12:
 			if (!freerdp_av1_copy_nv12_to_yuv420(av1, frame, roi.width, roi.height))
@@ -1063,9 +1066,12 @@ static INT32 av1_dav1d_convert(FREERDP_AV1_CONTEXT* av1, const Dav1dPicture* pic
 				                                        DstFormat, &roi);
 				break;
 			case DAV1D_PIXEL_LAYOUT_I444:
-				rec = primitives->YUV444ToRGB_8u_P3AC4R(pSrc, strides, pDstData, nDstStep,
-				                                        DstFormat, &roi);
+			{
+				const ptrdiff_t nativeStrides[3] = { pic->stride[0], pic->stride[1],
+					                                 pic->stride[1] };
+				rec = av1->i444ToRGB(pSrc, nativeStrides, pDstData, nDstStep, DstFormat, &roi);
 				break;
+			}
 			default:
 				WLog_Print(av1->log, WLOG_ERROR, "dav1d picture layout %d not supported",
 				           pic->p.layout);
@@ -1234,9 +1240,12 @@ INT32 freerdp_av1_decompress(FREERDP_AV1_CONTEXT* av1, const BYTE* pSrcData, UIN
 					                                        DstFormat, &roi);
 					break;
 				case AOM_IMG_FMT_I444:
-					rec = primitives->YUV444ToRGB_8u_P3AC4R(pSrc, strides, pDstData, nDstStep,
-					                                        DstFormat, &roi);
+				{
+					const ptrdiff_t nativeStrides[3] = { img->stride[0], img->stride[1],
+						                                 img->stride[2] };
+					rec = av1->i444ToRGB(pSrc, nativeStrides, pDstData, nDstStep, DstFormat, &roi);
 					break;
+				}
 				default:
 					WLog_Print(av1->log, WLOG_ERROR, "img->fmt %d not supported", img->fmt);
 					return -1;
@@ -1363,6 +1372,7 @@ FREERDP_AV1_CONTEXT* freerdp_av1_context_new(BOOL Compressor)
 		return nullptr;
 	ctx->encoder = Compressor;
 	ctx->backend = AV1_BACKEND_SOFTWARE;
+	ctx->i444ToRGB = av1_i444_converter();
 	ctx->log = WLog_Get(TAG);
 	if (!ctx->log)
 		goto fail;
