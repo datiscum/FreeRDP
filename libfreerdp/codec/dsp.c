@@ -759,7 +759,9 @@ static BOOL freerdp_dsp_decode_faad(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 		if (err != 0)
 			return FALSE;
 
-		if (channels != context->common.format.nChannels)
+		/* FAAD2 builds with parametric stereo support also expand ordinary mono AAC. */
+		if ((channels != context->common.format.nChannels) &&
+		    !((channels == 2) && (context->common.format.nChannels == 1)))
 			return FALSE;
 
 		if (samplerate != context->common.format.nSamplesPerSec)
@@ -797,7 +799,18 @@ static BOOL freerdp_dsp_decode_faad(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 		if (info.samples == 0)
 			continue;
 
-		Stream_Seek(out, info.samples * context->common.format.wBitsPerSample / 8);
+		if ((info.channels == 2) && (context->common.format.nChannels == 1))
+		{
+			const BYTE* decoded = sample_buffer;
+			for (size_t x = 0; x < info.samples / 2; x++)
+			{
+				const INT32 left = read_int16(&decoded[4 * x]);
+				const INT32 right = read_int16(&decoded[4 * x + 2]);
+				Stream_Write_INT16(out, (INT16)((left + right) / 2));
+			}
+		}
+		else
+			Stream_Seek(out, info.samples * context->common.format.wBitsPerSample / 8);
 	}
 
 	return TRUE;
@@ -1300,17 +1313,6 @@ FREERDP_DSP_CONTEXT* freerdp_dsp_context_new(BOOL encoder)
 	}
 
 #endif
-#if defined(WITH_FAAD2)
-
-	if (!encoder)
-	{
-		context->faad = NeAACDecOpen();
-
-		if (!context->faad)
-			goto fail;
-	}
-
-#endif
 	return context;
 fail:
 	freerdp_dsp_context_free(context);
@@ -1653,6 +1655,19 @@ BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 	if (!context || !targetFormat)
 		return FALSE;
 
+#if defined(WITH_OPUS)
+	if (context->opus_decoder)
+	{
+		opus_decoder_destroy(context->opus_decoder);
+		context->opus_decoder = nullptr;
+	}
+	if (context->opus_encoder)
+	{
+		opus_encoder_destroy(context->opus_encoder);
+		context->opus_encoder = nullptr;
+	}
+#endif
+
 	context->common.format = *targetFormat;
 
 	switch (context->common.format.wFormatTag)
@@ -1697,8 +1712,11 @@ BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 
 #if defined(WITH_OPUS)
 
-	if (opus_is_valid_samplerate(&context->common.format))
+	if (context->common.format.wFormatTag == WAVE_FORMAT_OPUS)
 	{
+		if (!opus_is_valid_samplerate(&context->common.format))
+			return FALSE;
+
 		if (!context->common.encoder)
 		{
 			int opus_error = OPUS_OK;
@@ -1730,10 +1748,17 @@ BOOL freerdp_dsp_context_reset(FREERDP_DSP_CONTEXT* WINPR_RESTRICT context,
 #endif
 #if defined(WITH_FAAD2)
 	context->faadSetup = FALSE;
+	if (!context->common.encoder && (targetFormat->wFormatTag == WAVE_FORMAT_AAC_MS))
+	{
+		NeAACDecClose(context->faad);
+		context->faad = NeAACDecOpen();
+		if (!context->faad)
+			return FALSE;
+	}
 #endif
 #if defined(WITH_FAAC)
 
-	if (context->common.encoder)
+	if (context->common.encoder && (targetFormat->wFormatTag == WAVE_FORMAT_AAC_MS))
 	{
 		faacEncConfigurationPtr cfg = nullptr;
 
