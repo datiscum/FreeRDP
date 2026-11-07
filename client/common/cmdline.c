@@ -2462,7 +2462,7 @@ static int parse_gfx_options(rdpSettings* settings, const COMMAND_LINE_ARGUMENT_
 #if defined(WITH_GFX_AV1)
 				else if (option_starts_with("AV1", val))
 				{
-					uint32_t profile = 1;
+					uint32_t profile = 0;
 					BOOL enabled = FALSE;
 					const PARSE_ON_OFF_RESULT bval = parse_on_off_option(val);
 					if (bval == PARSE_FAIL)

@@ -1,3 +1,4 @@
+#include <freerdp/config.h>
 #include <freerdp/client.h>
 #include <freerdp/client/cmdline.h>
 #include <freerdp/settings.h>
@@ -256,6 +257,37 @@ static BOOL check_settings_smart_sizing_size(rdpSettings* settings)
 	return result;
 }
 
+#if defined(WITH_GFX_AV1)
+static BOOL check_settings_av1(rdpSettings* settings, BOOL enabled, UINT32 profile)
+{
+	const BOOL actualEnabled = freerdp_settings_get_bool(settings, FreeRDP_GfxCodecAV1);
+	const UINT32 actualProfile = freerdp_settings_get_uint32(settings, FreeRDP_GfxCodecAV1Profile);
+	if ((actualEnabled != enabled) || (actualProfile != profile))
+	{
+		TEST_FAILURE("Expected AV1 enabled=%d profile=%" PRIu32 ", got enabled=%d profile=%" PRIu32
+		             "\n",
+		             enabled, profile, actualEnabled, actualProfile);
+		return FALSE;
+	}
+	return TRUE;
+}
+
+static BOOL check_settings_av1_i420(rdpSettings* settings)
+{
+	return check_settings_av1(settings, TRUE, 0);
+}
+
+static BOOL check_settings_av1_i444(rdpSettings* settings)
+{
+	return check_settings_av1(settings, TRUE, 1);
+}
+
+static BOOL check_settings_av1_off(rdpSettings* settings)
+{
+	return check_settings_av1(settings, FALSE, 0);
+}
+#endif
+
 typedef struct
 {
 	int expected_status;
@@ -271,6 +303,44 @@ typedef struct
 
 // NOLINTBEGIN(bugprone-suspicious-missing-comma)
 static const test tests[] = {
+#if defined(WITH_GFX_AV1)
+	{ 0,
+	  check_settings_av1_i420,
+	  { "testfreerdp", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_i420,
+	  { "testfreerdp", "/gfx:av1:ON", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_i420,
+	  { "testfreerdp", "/gfx:avc420:off,av1:on", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_i420,
+	  { "testfreerdp", "/gfx:av1:i420", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_i444,
+	  { "testfreerdp", "/gfx:av1:i444", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_off,
+	  { "testfreerdp", "/gfx:av1:off", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_i420,
+	  { "testfreerdp", "/gfx:av1:i444,av1:on", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_i420,
+	  { "testfreerdp", "/gfx:av1:i444,av1:i420", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+	{ 0,
+	  check_settings_av1_i444,
+	  { "testfreerdp", "/gfx:av1:on,av1:i444", "/v:test.freerdp.com", nullptr },
+	  { WINPR_C_ARRAY_INIT } },
+#endif
 	{ COMMAND_LINE_STATUS_PRINT_HELP,
 	  check_settings_smartcard_no_redirection,
 	  { "testfreerdp", "--help", nullptr },
