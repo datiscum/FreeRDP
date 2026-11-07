@@ -2944,7 +2944,9 @@ UINT xf_OutputExpose(xfContext* xfc, UINT32 x, UINT32 y, UINT32 width, UINT32 he
 			intersection.right -= surfaceRect.left;
 			intersection.bottom -= surfaceRect.top;
 #if defined(WITH_VAAPI) && defined(WITH_X11_VAAPI)
-			if (surface->vaapiDirectReady && xf_vaapi_render_allowed(xfc, surface))
+			/* Software GDI allocates only gdiGfxSurface, not the VAAPI extension. */
+			if (!freerdp_settings_get_bool(xfc->common.context.settings, FreeRDP_SoftwareGdi) &&
+			    surface->vaapiDirectReady && xf_vaapi_render_allowed(xfc, surface))
 			{
 				if (!region16_union_rect(&surface->vaapiInvalidRegion,
 				                         &surface->vaapiInvalidRegion, &intersection))
